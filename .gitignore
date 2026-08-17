@@ -1,0 +1,49 @@
+# Dependencies
+.venv/
+frontend/node_modules/
+node_modules/
+
+# Build
+frontend/.next/
+frontend/out/
+__pycache__/
+*.pyc
+*.pyo
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Next.js
+frontend/.next/
+frontend/out/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Data
+/data/
+/data/cvs/

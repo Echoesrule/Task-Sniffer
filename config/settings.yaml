@@ -1,0 +1,98 @@
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+
+scraping:
+  interval_minutes: 60
+  max_jobs_per_source: 50
+  request_delay_seconds: 2
+
+sources:
+  jobicy:
+    enabled: true
+    interval_minutes: 60
+    api_url: "https://jobicy.com/api/v2/remote-jobs"
+    params:
+      count: 50
+      tag: "remote"
+
+  greenhouse:
+    enabled: true
+    interval_minutes: 120
+    boards:
+      - "stripe"
+      - "figma"
+      - "airbnb"
+      - "discord"
+      - "pagerduty"
+      - "cribl"
+      - "gitlab"
+      - "canva"
+      - "databricks"
+      - "coinbase"
+
+  ashby:
+    enabled: true
+    interval_minutes: 120
+    boards:
+      - "openai"
+      - "anthropic"
+      - "linear"
+      - "notion"
+      - "figma"
+      - "ramp"
+      - "vercel"
+      - "posthog"
+
+  lever:
+    enabled: false
+    boards:
+      - "lever"
+
+  jo_bound:
+    enabled: false
+    interval_minutes: 240
+    url: "https://jobound.io"
+    max_pages: 5
+
+  newjob:
+    enabled: false
+    interval_minutes: 360
+    url: "https://newjob.tech"
+    max_pages: 3
+
+  unspook:
+    enabled: false
+    interval_minutes: 360
+    url: "https://unspook.com"
+    max_pages: 3
+
+filters:
+  keywords:
+    - "python"
+    - "javascript"
+    - "typescript"
+    - "react"
+    - "node"
+    - "fastapi"
+    - "django"
+    - "postgresql"
+    - "docker"
+    - "kubernetes"
+
+  exclude_keywords:
+    - "intern"
+    - "junior"
+    - "entry level"
+
+  min_salary: 80000
+  job_types:
+    - "full_time"
+    - "contract"
+    - "freelance"
+  remote_only: true
+
+analysis:
+  min_match_score: 60
+  max_risk_score: 60
+  store_all_jobs: true

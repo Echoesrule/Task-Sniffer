@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #0a0a0f;
+  --color-surface: #12121a;
+  --color-surface-2: #1a1a25;
+  --color-surface-3: #222230;
+  --color-border: #2a2a3a;
+  --color-border-light: #3a3a4a;
+  --color-text-primary: #e8e8ed;
+  --color-text-secondary: #8888a0;
+  --color-text-muted: #555570;
+
+  --color-accent: #6c5ce7;
+  --color-accent-hover: #7c6cf7;
+  --color-accent-muted: rgba(108, 92, 231, 0.15);
+
+  --color-green: #00d68f;
+  --color-green-muted: rgba(0, 214, 143, 0.15);
+  --color-amber: #ffaa00;
+  --color-amber-muted: rgba(255, 170, 0, 0.15);
+  --color-red: #ff3d71;
+  --color-red-muted: rgba(255, 61, 113, 0.15);
+  --color-blue: #0095ff;
+  --color-blue-muted: rgba(0, 149, 255, 0.15);
+
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+html {
+  background: var(--color-background);
+  color: var(--color-text-primary);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+::selection {
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
