@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { motion } from "framer-motion"
 import { FileText, Shield, Upload, Trash2, Eye, Replace, Check } from "lucide-react"
+import { useToast } from "@/components/ui/toast"
 
 const versions = [
   { name: "General CV", skills: 18, experiences: 3, projects: 5, recommended: true },
@@ -13,6 +14,8 @@ const versions = [
 ]
 
 export default function CVPage() {
+  const { toast } = useToast()
+
   return (
     <div className="min-h-screen bg-background flex">
       <Sidebar />
@@ -43,20 +46,22 @@ export default function CVPage() {
               </div>
             </div>
             <div className="flex items-center gap-2 mt-4">
-              <button className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
+              <button onClick={() => toast("CV preview opened")} className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
                 <Eye className="w-3.5 h-3.5" /> Preview
               </button>
-              <button className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
+              <button onClick={() => toast("Select a new CV file to replace")} className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
                 <Replace className="w-3.5 h-3.5" /> Replace
               </button>
-              <button className="flex items-center gap-1.5 bg-red-muted text-red hover:bg-red/20 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
+              <button onClick={() => toast("CV deleted", "error")} className="flex items-center gap-1.5 bg-red-muted text-red hover:bg-red/20 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors">
                 <Trash2 className="w-3.5 h-3.5" /> Delete
               </button>
             </div>
           </motion.div>
 
           {/* Upload */}
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}
+            onClick={() => toast("File picker opened")}
             className="border-2 border-dashed border-border rounded-xl p-8 text-center hover:border-accent/50 transition-colors cursor-pointer">
             <Upload className="w-8 h-8 text-text-muted mx-auto mb-2" />
             <p className="text-sm text-text-secondary font-medium">Drop your CV here or click to upload</p>
@@ -69,7 +74,9 @@ export default function CVPage() {
             <h2 className="text-sm font-semibold text-text-primary mb-4 uppercase tracking-wider">CV Versions</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {versions.map(v => (
-                <div key={v.name} className={`border rounded-lg p-4 transition-colors ${v.recommended ? "border-accent/50 bg-accent-muted/30" : "border-border hover:border-border-light"}`}>
+                <div key={v.name}
+                  onClick={() => toast(`Switched to ${v.name}`)}
+                  className={`border rounded-lg p-4 transition-colors cursor-pointer ${v.recommended ? "border-accent/50 bg-accent-muted/30 hover:bg-accent-muted/50" : "border-border hover:border-border-light hover:bg-surface-2"}`}>
                   <div className="flex items-center justify-between">
                     <h3 className="text-sm font-medium text-text-primary">{v.name}</h3>
                     {v.recommended && (

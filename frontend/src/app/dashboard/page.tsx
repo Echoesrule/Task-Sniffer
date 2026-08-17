@@ -127,11 +127,14 @@ export default function DashboardPage() {
                 const Icon = iconMap[event.type]
                 const color = colorMap[event.type]
                 return (
-                  <div key={event.id} className="flex items-center gap-3 px-4 py-3">
-                    <Icon className={`w-4 h-4 shrink-0 ${color}`} />
-                    <span className="text-sm text-text-primary flex-1">{event.message}</span>
-                    <span className="text-[11px] text-text-muted shrink-0">{timeAgo(event.timestamp)}</span>
-                  </div>
+                  <Link key={event.id} href="/jobs">
+                    <div className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2 transition-colors cursor-pointer">
+                      <Icon className={`w-4 h-4 shrink-0 ${color}`} />
+                      <span className="text-sm text-text-primary flex-1">{event.message}</span>
+                      <span className="text-[11px] text-text-muted shrink-0">{timeAgo(event.timestamp)}</span>
+                      <ChevronRight className="w-3 h-3 text-text-muted" />
+                    </div>
+                  </Link>
                 )
               })}
             </div>

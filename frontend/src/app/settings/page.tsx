@@ -5,6 +5,7 @@ import { Header } from "@/components/layout/header"
 import { motion } from "framer-motion"
 import { User, Briefcase, Radar, Shield, Save, Trash2, Download } from "lucide-react"
 import { useState } from "react"
+import { useToast } from "@/components/ui/toast"
 
 export default function SettingsPage() {
   const [autoScan, setAutoScan] = useState(true)
@@ -12,6 +13,7 @@ export default function SettingsPage() {
   const [autoApply, setAutoApply] = useState(false)
   const [minMatch, setMinMatch] = useState(80)
   const [maxRisk, setMaxRisk] = useState(25)
+  const { toast } = useToast()
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -94,16 +96,16 @@ export default function SettingsPage() {
               </div>
             </div>
             <div className="flex items-center gap-3 mt-4">
-              <button className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-2 rounded-lg transition-colors">
+              <button onClick={() => toast("Data exported successfully")} className="flex items-center gap-1.5 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-xs font-medium px-3 py-2 rounded-lg transition-colors">
                 <Download className="w-3.5 h-3.5" /> Export data
               </button>
-              <button className="flex items-center gap-1.5 bg-red-muted text-red hover:bg-red/20 text-xs font-medium px-3 py-2 rounded-lg transition-colors">
+              <button onClick={() => toast("Account data deleted", "error")} className="flex items-center gap-1.5 bg-red-muted text-red hover:bg-red/20 text-xs font-medium px-3 py-2 rounded-lg transition-colors">
                 <Trash2 className="w-3.5 h-3.5" /> Delete account data
               </button>
             </div>
           </motion.section>
 
-          <button className="flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
+          <button onClick={() => toast("Settings saved")} className="flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
             <Save className="w-4 h-4" /> Save settings
           </button>
         </main>

@@ -7,6 +7,9 @@ import { mockAnalytics, mockMatchDistribution } from "@/data/mock"
 import { motion } from "framer-motion"
 import { Send, CalendarCheck, Trophy, TrendingUp, BarChart3 } from "lucide-react"
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, CartesianGrid } from "recharts"
+import { useState } from "react"
+
+const timeRanges = ["7d", "30d", "90d", "All"]
 
 const funnelData = [
   { stage: "Discovered", count: 247, pct: 100 },
@@ -39,19 +42,33 @@ const weeklyData = [
 ]
 
 export default function AnalyticsPage() {
+  const [range, setRange] = useState("30d")
+
   return (
     <div className="min-h-screen bg-background flex">
       <Sidebar />
       <div className="flex-1 ml-[240px]">
         <Header title="Analytics" />
         <main className="p-6 max-w-[1400px] mx-auto space-y-6">
-          <motion.div className="grid grid-cols-2 lg:grid-cols-4 gap-4"
-            initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-            <StatCard icon={Send} label="Applications" value={mockAnalytics.total_applications} />
-            <StatCard icon={CalendarCheck} label="Interviews" value={3} />
-            <StatCard icon={Trophy} label="Offers" value={0} sublabel="Keep going!" />
-            <StatCard icon={TrendingUp} label="Interview Rate" value="25%" sublabel="3 of 12" />
-          </motion.div>
+          <div className="flex items-center justify-between">
+            <motion.div className="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1"
+              initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+              <StatCard icon={Send} label="Applications" value={mockAnalytics.total_applications} />
+              <StatCard icon={CalendarCheck} label="Interviews" value={3} />
+              <StatCard icon={Trophy} label="Offers" value={0} sublabel="Keep going!" />
+              <StatCard icon={TrendingUp} label="Interview Rate" value="25%" sublabel="3 of 12" />
+            </motion.div>
+            <div className="flex items-center gap-1 bg-surface border border-border rounded-lg p-1 ml-4 shrink-0">
+              {timeRanges.map(r => (
+                <button key={r} onClick={() => setRange(r)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    range === r ? "bg-accent text-white" : "text-text-secondary hover:text-text-primary hover:bg-surface-2"
+                  }`}>
+                  {r}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Application Funnel */}
