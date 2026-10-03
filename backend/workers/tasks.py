@@ -9,53 +9,54 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, max_retries=3)
 def scrape_all_sources(self):
-    """Run all enabled scrapers."""
+    """Run the ingestion engine over every crawlable registered source."""
     import asyncio
     asyncio.run(_scrape_all())
 
 
 async def _scrape_all():
-    from backend.scrapers.brightermonday import BrighterMondayScraper
-    from backend.scrapers.myjobs import MyJobsKenyaScraper
-    from backend.scrapers.jobicy import JobicyScraper
-    from backend.scrapers.greenhouse import GreenhouseScraper
-    from backend.scrapers.ashby import AshbyScraper
-    from backend.services.normalizer import JobNormalizer
-    from backend.services.deduplicator import JobDeduplicator
-    from backend.risk.engine import RiskEngine
-    from backend.matching.engine import MatchingEngine
     from backend.config import get_settings
     from backend.models.database import Database
+    from backend.services.ingestion import IngestionEngine
+    from backend.sources.registry import default_registry
 
     settings = get_settings()
     db = Database(settings.database_url)
-    normalizer = JobNormalizer()
-    risk_engine = RiskEngine()
+    await db.init_db()
+    engine = IngestionEngine(db.async_session_factory)
 
-    scrapers = [
-        BrighterMondayScraper({"enabled": True}),
-        MyJobsKenyaScraper({"enabled": True}),
-        JobicyScraper({"enabled": True}),
-        GreenhouseScraper({"enabled": True, "boards": ["airbnb", "discord", "figma", "vercel"]}),
-        AshbyScraper({"enabled": True, "boards": ["openai", "linear"]}),
-    ]
-
-    for scraper in scrapers:
-        if not scraper.enabled:
-            continue
+    for config in default_registry.crawlable():
         try:
-            raw_jobs = await scraper.fetch_jobs()
-            for raw_job in raw_jobs:
-                normalized = normalizer.normalize(raw_job, scraper.name)
-                risk_result = risk_engine.analyze(normalized)
-                normalized["risk_score"] = risk_result["risk_score"]
-                normalized["risk_level"] = risk_result["risk_level"]
-                normalized["risk_flags"] = risk_result["risk_flags"]
-            logger.info(f"{scraper.name}: processed {len(raw_jobs)} jobs")
-        except Exception as e:
-            logger.error(f"Scraper {scraper.name} failed: {e}")
-        finally:
-            await scraper.close()
+            result = await engine.run_source(config.name)
+            logger.info(
+                "[%s] run finished new=%d dup=%d errors=%d paused=%s",
+                config.name, result.new_jobs, result.duplicates, result.errors, result.paused,
+            )
+        except Exception as e:  # noqa: BLE001 - a failing source never blocks the rest
+            logger.error("Source %s run failed: %s", config.name, e)
+
+    await db.close()
+
+
+@celery_app.task(bind=True, max_retries=3)
+def ingest_source(self, name: str, force: bool = False, limit: int | None = None):
+    """Run a single source through the ingestion engine."""
+    import asyncio
+    return asyncio.run(_ingest_one(name, force=force, limit=limit))
+
+
+async def _ingest_one(name: str, *, force: bool, limit: int | None):
+    from backend.config import get_settings
+    from backend.models.database import Database
+    from backend.services.ingestion import IngestionEngine
+
+    settings = get_settings()
+    db = Database(settings.database_url)
+    await db.init_db()
+    engine = IngestionEngine(db.async_session_factory)
+    result = await engine.run_source(name, force=force, limit=limit)
+    await db.close()
+    return result.as_dict()
 
 
 @celery_app.task(bind=True, max_retries=3)

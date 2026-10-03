@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func as sa_func
 
 from backend.api.deps import set_db
-from backend.api.routes import applications, analytics, candidates, jobs
+from backend.api.routes import applications, analytics, candidates, jobs, sources
 from backend.config import get_settings
 from backend.models.database import Database, Source
 
@@ -28,17 +28,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     set_db(db)
 
     async with db.async_session_factory() as session:
-        result = await session.execute(select(Source))
-        if not result.scalars().first():
-            default_sources = [
-                Source(name="brightermonday", url="https://www.brightermonday.com", tier=1, enabled=True, country_focus="KE"),
-                Source(name="myjobs", url="https://myjobskenya.com", tier=1, enabled=True, country_focus="KE"),
-                Source(name="jobicy", url="https://jobicy.com", tier=2, enabled=True, country_focus="GLOBAL"),
-                Source(name="greenhouse", url="https://boards-api.greenhouse.io", tier=2, enabled=True, country_focus="GLOBAL"),
-                Source(name="ashby", url="https://api.ashbyhq.com", tier=2, enabled=True, country_focus="GLOBAL"),
-            ]
-            session.add_all(default_sources)
-            await session.commit()
+        # Sync audited registry -> DB rows (upsert, preserving any manual state)
+        from backend.sources.registry import default_registry
+
+        existing = {s.name: s for s in (await session.execute(select(Source))).scalars().all()}
+        for config in default_registry.all():
+            row = existing.get(config.name)
+            if row is None:
+                row = Source(
+                    name=config.name,
+                    url=config.url or f"https://{config.name}",
+                    tier=config.tier,
+                    enabled=config.source_status.value != "DISABLED",
+                    country_focus=config.country_focus,
+                    access_method=config.access_method.value,
+                    permission_status=config.permission_status.value,
+                    robots_status=config.robots_status.value,
+                    terms_status=config.terms_status.value,
+                    provenance=config.provenance.value,
+                    rate_limit=config.rate_limit,
+                    requires_auth=config.requires_auth,
+                    last_audited=config.last_audited,
+                )
+                session.add(row)
+            else:
+                row.access_method = config.access_method.value
+                row.permission_status = config.permission_status.value
+                row.robots_status = config.robots_status.value
+                row.terms_status = config.terms_status.value
+                row.provenance = config.provenance.value
+                row.rate_limit = config.rate_limit
+                row.requires_auth = config.requires_auth
+                row.last_audited = config.last_audited
+        await session.commit()
 
     # Start Telegram bot
     telegram_task = None
@@ -107,6 +129,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+    app.include_router(sources.router, prefix="/sources", tags=["sources"])
     app.include_router(candidates.router, prefix="/candidate", tags=["candidates"])
     app.include_router(applications.router, prefix="/applications", tags=["applications"])
     app.include_router(analytics.router, prefix="/analytics", tags=["analytics"])

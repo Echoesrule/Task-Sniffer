@@ -47,6 +47,29 @@ class Source(Base):
     enabled = Column(Boolean, default=True)
     country_focus = Column(String(10))
 
+    # access-policy (spec §1-2) populated from the source audit
+    access_method = Column(String(20), default="html")
+    permission_status = Column(String(20), default="REVIEW")
+    robots_status = Column(String(20), default="UNKNOWN")
+    terms_status = Column(String(20), default="UNCLEAR")
+    provenance = Column(String(20), default="unknown")
+    requires_auth = Column(Boolean, default=False)
+    rate_limit = Column(Float, default=2.0)
+    last_audited = Column(DateTime(timezone=True), nullable=True)
+
+    # runtime health (spec §16)
+    source_status = Column(String(20), default="ACTIVE")
+    pause_reason = Column(String(500), nullable=True)
+    retry_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, default=0)
+    last_error = Column(String(2000), nullable=True)
+    last_successful_fetch = Column(DateTime(timezone=True), nullable=True)
+
+    # url-quality metrics (spec §8)
+    invalid_url_rate = Column(Float, default=0.0)
+    review_url_rate = Column(Float, default=0.0)
+    average_job_age = Column(Float, nullable=True)
+
     jobs_found = Column(Integer, default=0)
     unique_jobs = Column(Integer, default=0)
     duplicate_rate = Column(Float, default=0.0)
@@ -116,6 +139,17 @@ class Job(Base):
 
     application_url = Column(String(2048), nullable=True)
     company_url = Column(String(2048), nullable=True)
+
+    # URL pipeline provenance (spec §7-11)
+    source_url = Column(String(2048), nullable=True, index=True)
+    canonical_url = Column(String(2048), nullable=True, index=True)
+    original_url = Column(String(2048), nullable=True)
+    final_url = Column(String(2048), nullable=True)
+    redirect_chain = Column(Text, default="[]")
+    url_status = Column(String(20), default="NEEDS_REVIEW")
+    url_validated_at = Column(DateTime(timezone=True), nullable=True)
+    provenances = Column(Text, default="[]")
+
     posted_at = Column(DateTime(timezone=True), nullable=True)
     closing_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -158,6 +192,28 @@ class Job(Base):
     @skills_list.setter
     def skills_list(self, value: list[str]) -> None:
         self.skills = json.dumps(value)
+
+    @property
+    def provenances_list(self) -> list[dict]:
+        try:
+            return json.loads(self.provenances) if self.provenances else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @provenances_list.setter
+    def provenances_list(self, value: list[dict]) -> None:
+        self.provenances = json.dumps(value)
+
+    @property
+    def redirect_chain_list(self) -> list[str]:
+        try:
+            return json.loads(self.redirect_chain) if self.redirect_chain else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @redirect_chain_list.setter
+    def redirect_chain_list(self, value: list[str]) -> None:
+        self.redirect_chain = json.dumps(value)
 
     @property
     def risk_flags_list(self) -> list[dict]:
@@ -346,6 +402,31 @@ class JobFingerprint(Base):
         return f"<JobFingerprint {self.fingerprint[:16]}...>"
 
 
+class IngestionError(Base):
+    """Audit log of a single job-listing ingestion failure (spec §16)."""
+
+    __tablename__ = "ingestion_errors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(Integer, ForeignKey("sources.id"), nullable=False)
+    job_url = Column(String(2048), nullable=True)
+    stage = Column(String(50), nullable=False)
+    error_class = Column(String(255), nullable=True)
+    error_message = Column(Text, nullable=True)
+    attempt = Column(Integer, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    source = relationship("Source")
+
+    __table_args__ = (
+        Index("ix_ingestion_errors_source_id", "source_id"),
+        Index("ix_ingestion_errors_created_at", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IngestionError {self.stage} ({self.error_class}) for {self.job_url}>"
+
+
 class TelegramUser(Base):
     """Tracks Telegram users for bot alerts."""
 
@@ -423,6 +504,65 @@ class Database:
     async def init_db(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        await self._apply_additive_migrations()
+
+    async def _apply_additive_migrations(self) -> None:
+        """Add columns introduced after a DB was first created.
+
+        Alembic is not wired for the SQLite dev DB, so we perform idempotent
+        additive ALTER TABLE statements for columns absent from existing tables.
+        Only additive changes are permitted here (never drops/renames).
+        """
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy import text
+
+        async with self.engine.begin() as conn:
+            for table, columns in _ADDITIVE_COLUMNS.items():
+                inspector = await conn.run_sync(lambda sync, t=table: sa_inspect(sync).has_table(t))
+                if not inspector:
+                    continue
+                existing = {
+                    col["name"]
+                    for col in await conn.run_sync(lambda sync, t=table: sa_inspect(sync).get_columns(t))
+                }
+                for name, definition in columns.items():
+                    if name not in existing:
+                        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}"))
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+
+#: additive columns for existing tables (idempotent ALTER TABLE on first boot).
+#: Definitions must be legal SQLite ADD COLUMN clauses.
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "sources": {
+        "access_method": "VARCHAR(20) DEFAULT 'html'",
+        "permission_status": "VARCHAR(20) DEFAULT 'REVIEW'",
+        "robots_status": "VARCHAR(20) DEFAULT 'UNKNOWN'",
+        "terms_status": "VARCHAR(20) DEFAULT 'UNCLEAR'",
+        "provenance": "VARCHAR(20) DEFAULT 'unknown'",
+        "requires_auth": "BOOLEAN DEFAULT 0",
+        "rate_limit": "FLOAT DEFAULT 2.0",
+        "last_audited": "DATETIME",
+        "source_status": "VARCHAR(20) DEFAULT 'ACTIVE'",
+        "pause_reason": "VARCHAR(500)",
+        "retry_at": "DATETIME",
+        "retry_count": "INTEGER DEFAULT 0",
+        "last_error": "VARCHAR(2000)",
+        "last_successful_fetch": "DATETIME",
+        "invalid_url_rate": "FLOAT DEFAULT 0.0",
+        "review_url_rate": "FLOAT DEFAULT 0.0",
+        "average_job_age": "FLOAT",
+    },
+    "jobs": {
+        "source_url": "VARCHAR(2048)",
+        "canonical_url": "VARCHAR(2048)",
+        "original_url": "VARCHAR(2048)",
+        "final_url": "VARCHAR(2048)",
+        "redirect_chain": "TEXT DEFAULT '[]'",
+        "url_status": "VARCHAR(20) DEFAULT 'NEEDS_REVIEW'",
+        "url_validated_at": "DATETIME",
+        "provenances": "TEXT DEFAULT '[]'",
+    },
+}
