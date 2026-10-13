@@ -196,6 +196,7 @@ class IngestionEngine:
                             adapter=adapter,
                             item=item,
                             source_row=source_row,
+                            limiter=limiter,
                         )
                     jobs_seen += 1
                     result.new_jobs += outcome.new
@@ -253,6 +254,7 @@ class IngestionEngine:
         adapter: JobSourceAdapter,
         item: ListingItem,
         source_row: Source,
+        limiter: RateLimiter | None = None,
     ) -> "_ListingOutcome":
         outcome = _ListingOutcome()
 
@@ -263,7 +265,9 @@ class IngestionEngine:
             outcome.errors_details.append(f"{item.title}: no job-detail URL identified")
             return outcome
 
-        detail, validation = await self._fetch_and_validate(adapter, item, candidate["url"])
+        detail, validation = await self._fetch_and_validate(
+            adapter, item, candidate["url"], limiter
+        )
 
         # --- build raw job dict -----------------------------------------
         raw = item.as_raw()
@@ -341,7 +345,11 @@ class IngestionEngine:
         return {"url": chosen.url, "kind": chosen.kind.value}
 
     async def _fetch_and_validate(
-        self, adapter: JobSourceAdapter, item: ListingItem, url: str
+        self,
+        adapter: JobSourceAdapter,
+        item: ListingItem,
+        url: str,
+        limiter: RateLimiter | None = None,
     ) -> tuple[dict[str, Any], Any]:
         """Fetch the detail page once, resolve redirects, run the §8 checklist.
 
@@ -371,6 +379,9 @@ class IngestionEngine:
                 validation.status = UrlStatus.NEEDS_REVIEW
             validation.reason = fetch_error or "fetch failed"
             return {}, validation
+
+        if limiter is not None:
+            limiter.record_response(response)
 
         html = response.text if 200 <= response.status_code < 300 else ""
         page_title = _page_title(html)

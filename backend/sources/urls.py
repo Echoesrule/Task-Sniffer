@@ -214,33 +214,64 @@ def _skips_dns_check(host: str) -> bool:
 
 
 async def _resolve_host_ips_cached(host: str) -> frozenset[str]:
-    """Resolve via a worker thread with a timeout, caching results per process."""
+    """Resolve via a worker thread with a timeout, caching results per process.
+
+    Only successful, non-empty resolutions are cached. A failed, timed-out, or
+    empty lookup is intentionally *not* cached so a transient DNS failure does
+    not permanently lock a host out; it is also treated as unverifiable by the
+    caller (fail-closed), never as safe.
+    """
     if host in _DNS_CACHE:
         return _DNS_CACHE[host]
     try:
         ips = await asyncio.wait_for(asyncio.to_thread(_resolve_host_ips, host), timeout=_DNS_TIMEOUT)
         result = frozenset(ips)
-    except Exception:  # noqa: BLE001 - timeout/failure => treat as unresolvable
+    except Exception:  # noqa: BLE001 - timeout/failure => unverifiable
         result = frozenset()
-    _DNS_CACHE[host] = result
+    if result:
+        _DNS_CACHE[host] = result
     return result
 
 
-async def _url_is_safe_async(url: str) -> bool:
-    """Static SSRF checks plus an asynchronous DNS check for hostnames."""
+#: outbound destination safety verdicts
+SAFETY_SAFE = "safe"
+SAFETY_UNSAFE = "unsafe"
+SAFETY_UNVERIFIED = "unverified"
+
+
+async def _classify_url_safety(url: str) -> str:
+    """Classify a fetch destination as safe / unsafe / unverifiable.
+
+    Static checks (scheme, port, literal IP ranges) run first. Hostnames are
+    then resolved and *every* resolved address must be public. A lookup that
+    fails, times out, or yields no addresses is ``unverified`` and treated as
+    fail-closed: the request must not be issued, but the outcome is recorded as
+    inconclusive (NEEDS_REVIEW) rather than proven-malicious.
+    """
     if not is_safe_fetch_url(url, resolve_dns=False):
-        return False
+        return SAFETY_UNSAFE
     host = (urlparse(url).hostname or "").strip().lower()
     if _parse_host_ip(host) is not None or _skips_dns_check(host):
-        return True
-    for literal in await _resolve_host_ips_cached(host):
+        return SAFETY_SAFE
+    ips = await _resolve_host_ips_cached(host)
+    if not ips:
+        return SAFETY_UNVERIFIED
+    for literal in ips:
         try:
             resolved = ipaddress.ip_address(literal)
         except ValueError:
             continue
         if _ip_is_unsafe(resolved):
-            return False
-    return True
+            return SAFETY_UNSAFE
+    return SAFETY_SAFE
+
+
+async def _url_is_safe_async(url: str) -> bool:
+    """Boolean form of :func:`_classify_url_safety` (fail-closed).
+
+    An unverifiable destination returns ``False``.
+    """
+    return await _classify_url_safety(url) == SAFETY_SAFE
 
 
 def is_safe_fetch_url(url: str, *, resolve_dns: bool = False) -> bool:
@@ -249,9 +280,11 @@ def is_safe_fetch_url(url: str, *, resolve_dns: bool = False) -> bool:
     Checks are applied to IP literals directly (including legacy decimal, hex
     and octal encodings and IPv4-mapped IPv6). When ``resolve_dns`` is set,
     hostnames are also resolved and rejected if *any* resolved address is
-    private/loopback/link-local/reserved. DNS rebinding (resolution changing
-    between check and connect) remains a residual TOCTOU risk and is not
-    eliminated here.
+    private/loopback/link-local/reserved. When resolution fails, times out, or
+    returns no addresses the destination is refused (fail-closed) rather than
+    allowed. DNS rebinding (the address changing between this check and the
+    actual connect) remains a residual TOCTOU risk; see
+    :func:`fetch_with_policy`.
     """
     try:
         parsed = urlparse(url)
@@ -602,9 +635,16 @@ async def fetch_with_policy(
     no request is ever sent to a loopback/private/link-local/reserved host,
     a non-HTTP(S) scheme, or a non-web port, even as an intermediate hop.
 
+    Destination safety is fail-closed: a host that cannot be resolved (DNS
+    failure or timeout) is refused and reported as unverifiable. DNS rebinding
+    between this check and the connect is a residual TOCTOU risk and is *not*
+    eliminated here (mitigate with an outbound egress proxy that enforces the
+    same policy).
+
     Returns ``(response, final_url, chain, error)``. ``response`` is ``None``
     when a hop was refused, a loop/limit was hit, or the request failed; the
-    ``error`` string distinguishes unsafe destinations from inconclusive
+    ``error`` string distinguishes unsafe destinations ("unsafe") from
+    merely-unverifiable ones ("could not be verified") and inconclusive
     outcomes.
     """
     start = normalize_url(url) or url
@@ -613,10 +653,12 @@ async def fetch_with_policy(
 
     for _ in range(max_redirects + 1):
         if resolve_dns:
-            safe = await _url_is_safe_async(current)
-        else:
-            safe = is_safe_fetch_url(current)
-        if not safe:
+            verdict = await _classify_url_safety(current)
+            if verdict == SAFETY_UNSAFE:
+                return None, current, chain, "unsafe destination (SSRF policy)"
+            if verdict == SAFETY_UNVERIFIED:
+                return None, current, chain, "destination could not be verified (DNS)"
+        elif not is_safe_fetch_url(current):
             return None, current, chain, "unsafe destination (SSRF policy)"
 
         try:

@@ -627,3 +627,112 @@ Result: **164 passed** (138 prior + 26 new), 0 failures.
 - DNS fail-open / rebinding (TOCTOU) and dead-code removal remain deferred to
   the security phase.
 
+# Phase 5 — End-to-End Verification and Production Readiness: Implementation Report
+
+Scope: verify the completed Phase 1–4 pipeline (correctness, security,
+resilience, observability, deployment readiness) and apply only narrowly scoped
+fixes for confirmed defects. No schema migration, no data rewrite, no production
+record touched, no broad rewrite.
+
+## 1. Baseline
+
+- `git status` clean except unrelated local files (`frontend/package-lock.json`,
+  `close`, `notes`) — excluded from commits.
+- Entry point `backend/services/ingestion.py:IngestionEngine.run_source` is shared
+  by the API (`POST /sources/{name}/ingest`), Celery (`backend/workers/tasks.py`)
+  and the Telegram/periodic paths — one engine, asserted by test.
+- Production path traced: registry → adapter (`factory.build_adapter`) →
+  `fetch_listings` → per-listing candidate resolution → `fetch_with_policy`
+  (per-hop SSRF/DNS) → `validate_job_page` gate → normalize → `_persist_job`
+  (savepoint + dedup) → source metrics. Matches the Phase 1–4 design.
+
+## 2. Findings (severity-rated)
+
+| # | Severity | Finding | Evidence | Disposition |
+|---|----------|---------|----------|-------------|
+| F1 | Critical | Auth is non-functional. `get_current_user` accepts any non-empty Bearer token and returns a placeholder user; no route issues or verifies a JWT (`decode_access_token` is unused) and there is no login endpoint. | `backend/api/deps.py:33`; `backend/security/__init__.py:32` | **Not fixed** (needs a real auth service / user store — out of narrow-fix scope). **Release blocker.** All mutating routes now at least require *a* token. |
+| F2 | High | Source-mutating endpoints (`POST /sources/{name}/ingest`, `/pause`, `/resume`) had **no** auth dependency. | `backend/api/routes/sources.py` | **Fixed**: added `Depends(get_current_user)`. |
+| F3 | High | CV upload wrote to `/tmp/cvs/{client filename}` — path traversal + arbitrary unauthenticated file write (and delete via `cv_file_path`); no size or extension enforcement. | `backend/api/routes/candidates.py:117` (pre-fix) | **Fixed**: `os.path.basename`, UUID filename, extension allowlist, 10 MB cap, storage under `settings.cv_storage_path`. |
+| F4 | High | DNS resolution failure was **fail-open**: an unresolvable host yielded an empty address set, which passed the SSRF check (`return True`). | `backend/sources/urls.py:_url_is_safe_async` (pre-fix) | **Fixed**: `_classify_url_safety` returns `safe`/`unsafe`/`unverified`; unverifiable destinations are refused. |
+| F5 | Medium | Negative DNS results were cached for the process lifetime, so a transient failure would permanently lock a host out once fail-closed was introduced. | `backend/sources/urls.py:_resolve_host_ips_cached` (pre-fix) | **Fixed**: only non-empty resolutions are cached. |
+| F6 | Medium | CORS `allow_origins=["*"]` with `allow_credentials=True` — invalid per spec and a misconfiguration. | `backend/api/app.py` (pre-fix) | **Fixed**: `allow_credentials=False` (auth is Bearer, not cookies). |
+| F7 | Medium | Rate-limit detection was dead code: `RateLimiter.record_response` was never called, so `should_pause` could never fire and 429/5xx never throttled a source. | `backend/services/ingestion.py` | **Fixed**: detail fetches now call `limiter.record_response`; wired through `_process_listing`/`_fetch_and_validate`. |
+| F8 | Medium | No application logging configuration: the run-summary `logger.info` lines were suppressed at the default root level. | `backend/api/app.py` | **Fixed**: `logging.basicConfig(level=INFO)` in `create_app`. |
+| F9 | Medium | No `.dockerignore`; the `Dockerfile` does `COPY . .`, so `.env`, `*.db`, `venv/` and `frontend/node_modules` could be baked into the image. | repo root | **Fixed**: added `.dockerignore`. |
+| F10 | Medium | Unbounded HTTP response body: `fetch_with_policy` uses `client.get` and buffers the whole body; no size limit (DoS via large page). | `backend/sources/urls.py:665` | **Documented**; streaming cap is a larger change than a narrow fix. Recommended pre-scale. |
+| F11 | Low | Stale tracked runtime files `bot.pid`, `frontend.pid`; `bot.sh` hardcodes a wrong `BOT_DIR`. | `git ls-files`; `bot.sh` | **Documented** (untrack + fix path). |
+| F12 | Low | `structlog`/`tenacity` in `requirements.txt` but unused; `celery` not installed in the current venv so `backend/workers/tasks.py` cannot be imported here. | `requirements.txt` | **Documented**. |
+
+## 3. Residual security risk (explicitly NOT claimed as solved)
+
+- **DNS rebinding / TOCTOU (F4 residual).** `fetch_with_policy` re-resolves and
+  re-checks each hop, but the address can still change between the check and the
+  socket connect. This is **not** eliminated. Mitigation: run egress through a
+  proxy that enforces the same private-range policy. This was deferred in
+  `notes` and is now resolved to the extent that *unverifiable* hosts fail
+  closed; rebinding remains open by design.
+- **SSRF policy is per-hop and fail-closed for private ranges** (loopback, RFC1918,
+  link-local, reserved, multicast, unspecified) including encoded IPv4 forms and
+  IPv4-mapped IPv6; non-web ports `{80,443,8080,8443}` only.
+- **SQL injection:** none found. All queries use SQLAlchemy expressions; the only
+  raw SQL is `ALTER TABLE {table} ADD COLUMN {name} {definition}` from a static
+  internal dict, never user input.
+- **Secrets in logs:** none found. `secret_key`/`encryption_key` default to
+  `change-me` and **must** be overridden in `.env` before deployment.
+
+## 4. End-to-end verification (new tests)
+
+`tests/integration/test_e2e_ingestion.py` (12) — mocked HTTP + isolated temp DB:
+valid posting persisted with distinct, validated canonical/application URLs;
+search/category/company rejected as INVALID and a bare `/careers` withheld;
+expired (410 / "removed") rejected; 429 withheld as NEEDS_REVIEW; a withheld
+update never overwrites a valid record; ATS id survives normalization; redirect
+to `10.0.0.5` is blocked and never requested; an unresolvable host is fail-closed
+and never requested; re-ingestion creates no duplicate; distinct postings are not
+merged; API and Celery share `IngestionEngine.run_source`; source mutations
+require auth.
+
+`tests/integration/test_api_security.py` (5) — CV filename sanitization stays in
+storage, bad extension rejected, oversized rejected, missing/empty token → 401,
+CORS credentials disabled under wildcard.
+
+`tests/unit/test_validation_gating.py` (+2) — DNS failure is fail-closed, not
+cached, and classified distinctly from "unsafe".
+
+## 5. Tests passing / failing
+
+```
+.venv/bin/python -m pytest tests -q
+```
+
+Result: **183 passed** (164 prior + 19 new), 0 failures.
+
+## 6. Release readiness / go-no-go
+
+- **Go only after F1 is resolved.** The API currently authenticates nobody;
+  everything except `get_current_user` being a stub. This is the single hard
+  blocker.
+- **Schema management:** Alembic `versions/` is empty; schema is created by
+  `Base.metadata.create_all` plus idempotent additive `ALTER TABLE` on every
+  startup. Reversible migrations are **not** available. `BOOLEAN DEFAULT 0` in
+  `_ADDITIVE_COLUMNS` is SQLite-oriented and must be verified on PostgreSQL
+  before a Postgres rollout. Backups: SQLite file copy; Postgres `pg_dump`.
+- **Worker:** `POST /sources/{name}/ingest` runs the full scrape inline in the
+  request; production should dispatch to Celery instead.
+- **Repair tooling:** `scripts/audit_job_urls.py` is read-only and never
+  auto-runs; no data was modified by this phase.
+- **Config:** `SECRET_KEY`/`ENCRYPTION_KEY` must be set; `.env` is gitignored and
+  now excluded from Docker builds.
+
+## 7. Files changed (Phase 5)
+
+- `backend/sources/urls.py` — fail-closed destination classification, no negative
+  DNS caching, docstrings.
+- `backend/services/ingestion.py` — rate-limit `record_response` wiring.
+- `backend/api/routes/sources.py` — auth on ingest/pause/resume.
+- `backend/api/routes/candidates.py` — CV upload traversal/size/type hardening.
+- `backend/api/app.py` — CORS credentials + logging config.
+- `.dockerignore` — new.
+- `tests/integration/test_e2e_ingestion.py`, `tests/integration/test_api_security.py` — new.
+- `tests/unit/test_validation_gating.py` — DNS fail-closed tests.
+

@@ -563,6 +563,51 @@ def test_dns_resolving_to_private_is_blocked(monkeypatch):
     assert hits == []
 
 
+def test_dns_failure_is_fail_closed_and_not_cached(monkeypatch):
+    import backend.sources.urls as urlsmod
+
+    monkeypatch.setattr(urlsmod, "_resolve_host_ips", lambda host: set())
+    urlsmod._DNS_CACHE.clear()
+    hits: list[str] = []
+
+    def handler(request):
+        hits.append(str(request.url))
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=VALID_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+    async def go():
+        try:
+            return await urlsmod.fetch_with_policy(client, "https://unresolvable.public-ats.net/jobs/x")
+        finally:
+            await client.aclose()
+
+    response, _final, _chain, error = _run(go())
+    assert response is None, "unverifiable host must not be fetched"
+    assert "could not be verified" in error
+    assert "unsafe" not in error
+    assert hits == []
+    # failures must not poison the cache (no permanent lock-out)
+    assert "unresolvable.public-ats.net" not in urlsmod._DNS_CACHE
+
+
+def test_classify_url_safety_verdicts(monkeypatch):
+    import backend.sources.urls as urlsmod
+
+    monkeypatch.setattr(urlsmod, "_resolve_host_ips", lambda host: set())
+    urlsmod._DNS_CACHE.clear()
+    assert _run(urlsmod._classify_url_safety("https://unresolvable.public-ats.net/x")) == urlsmod.SAFETY_UNVERIFIED
+
+    monkeypatch.setattr(urlsmod, "_resolve_host_ips", lambda host: {"10.1.2.3"})
+    urlsmod._DNS_CACHE.clear()
+    assert _run(urlsmod._classify_url_safety("https://rebind.public-ats.net/x")) == urlsmod.SAFETY_UNSAFE
+
+    monkeypatch.setattr(urlsmod, "_resolve_host_ips", lambda host: {"93.184.216.34"})
+    urlsmod._DNS_CACHE.clear()
+    assert _run(urlsmod._classify_url_safety("https://real-ats.net/x")) == urlsmod.SAFETY_SAFE
+    assert urlsmod._DNS_CACHE["real-ats.net"] == frozenset({"93.184.216.34"})
+
+
 def test_encoded_ip_literals_are_rejected():
     for url in (
         "http://2130706433/",

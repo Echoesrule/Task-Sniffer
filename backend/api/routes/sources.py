@@ -16,7 +16,7 @@ from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from backend.api.deps import get_db
+from backend.api.deps import get_current_user, get_db
 from backend.models.database import IngestionError, Job, Source
 from backend.sources.registry import default_registry
 
@@ -157,6 +157,7 @@ async def ingest_source(
     name: str,
     request: SourceRunRequest,
     db: AsyncSession = Depends(get_db),
+    _user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Trigger a single-source run against the ingestion engine (spec §6)."""
     from backend.services.ingestion import IngestionEngine
@@ -177,6 +178,7 @@ async def pause_source(
     name: str,
     db: AsyncSession = Depends(get_db),
     reason: str = Query("MANUAL", description="Reason for pausing"),
+    _user: dict[str, Any] = Depends(get_current_user),
 ) -> PauseResponse:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:
@@ -192,6 +194,7 @@ async def pause_source(
 async def resume_source(
     name: str,
     db: AsyncSession = Depends(get_db),
+    _user: dict[str, Any] = Depends(get_current_user),
 ) -> PauseResponse:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy import select
@@ -10,9 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import get_current_user, get_db
 from backend.api.schemas import CandidateProfile, CVUploadResponse
+from backend.config import get_settings
 from backend.models.database import Candidate, User
 
 router = APIRouter()
+
+MAX_CV_BYTES = 10 * 1024 * 1024
+_ALLOWED_CV_SUFFIXES = {".pdf", ".doc", ".docx"}
 
 
 def _candidate_to_response(c: Candidate) -> CandidateProfile:
@@ -115,9 +122,26 @@ async def upload_cv(
         )
 
     content = await file.read()
-    cv_path = f"/tmp/cvs/{file.filename}"
-    import os
-    os.makedirs("/tmp/cvs", exist_ok=True)
+    if len(content) > MAX_CV_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CV exceeds the {MAX_CV_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    # Never trust the client filename: strip any path components and derive the
+    # stored name from a server-generated UUID so uploads cannot escape the
+    # storage directory (path traversal) or collide.
+    safe_name = os.path.basename(file.filename or "").strip()
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in _ALLOWED_CV_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file extension '{suffix or safe_name}'. Allowed: .pdf, .doc, .docx",
+        )
+
+    dest_dir = Path(get_settings().cv_storage_path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    cv_path = str(dest_dir / f"{uuid.uuid4().hex}{suffix}")
     with open(cv_path, "wb") as f:
         f.write(content)
 
@@ -147,7 +171,6 @@ async def delete_cv(
     )
     candidate = result.scalars().first()
     if candidate and candidate.cv_file_path:
-        import os
         if os.path.exists(candidate.cv_file_path):
             os.remove(candidate.cv_file_path)
         candidate.cv_file_path = None
