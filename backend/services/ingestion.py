@@ -36,6 +36,7 @@ from backend.sources.urls import (
     CandidateLink,
     canonicalize_url,
     classify_url,
+    extract_url_signals,
     fetch_with_policy,
     identify_job_url,
     looks_like_html,
@@ -255,7 +256,8 @@ class IngestionEngine:
         normalized["url_status"] = raw.get("url_status") or UrlStatus.VALID.value
         normalized["source_url"] = candidate["url"]
         normalized["_original_url"] = candidate["url"]
-        normalized["application_url"] = raw.get("application_url") or ""
+        normalized["application_url"] = detail.get("_application_url") or ""
+        normalized["_canonical_url"] = detail.get("_canonical_url") or ""
         normalized["_final_url"] = raw.get("_final_url")
         normalized["_redirect_chain"] = raw.get("_redirect_chain") or []
         normalized["_http_status"] = raw.get("_http_status")
@@ -374,6 +376,17 @@ class IngestionEngine:
                 logger.debug("[%s] detail parse failed %s: %s", adapter.name, final_url, exc)
                 detail = {}
 
+            signals = extract_url_signals(
+                html,
+                final_url,
+                allowed_domains=allowed_domains,
+                apply_hint=item.apply_hint,
+                detail_url=final_url,
+            )
+            detail["_canonical_url"] = signals.canonical_url
+            detail["_application_url"] = signals.application_url
+            detail["_url_notes"] = signals.notes
+
         detail["_final_url"] = final_url
         detail["_redirect_chain"] = chain
         detail["_http_status"] = response.status_code
@@ -402,6 +415,8 @@ class IngestionEngine:
         source_job_id = normalized.get("source_job_id", "")
         source_url = normalized.get("source_url", "") or candidate.get("url", "")
         original_url = normalized.get("_original_url") or source_url
+        canonical_url = normalized.get("_canonical_url") or source_url
+        application_url = normalized.get("application_url") or ""
 
         # 1) exact re-scrape of same source+id -> update URL fields
         if source_job_id:
@@ -415,12 +430,12 @@ class IngestionEngine:
             ).scalar_one_or_none()
             if existing is not None:
                 existing.source_url = source_url
-                existing.canonical_url = source_url
+                existing.canonical_url = canonical_url or existing.canonical_url or source_url
                 existing.original_url = existing.original_url or original_url
                 if normalized.get("_final_url"):
                     existing.final_url = normalized["_final_url"]
-                if normalized.get("application_url"):
-                    existing.application_url = normalized["application_url"]
+                if application_url:
+                    existing.application_url = application_url
                 existing.url_status = UrlStatus.VALID.value
                 existing.url_validated_at = utcnow()
                 existing.scraped_at = datetime.now(timezone.utc)
@@ -460,11 +475,11 @@ class IngestionEngine:
             salary_max=normalized.get("salary_max"),
             salary_currency=normalized.get("salary_currency"),
             source_url=source_url,
-            canonical_url=source_url,
+            canonical_url=canonical_url,
             original_url=original_url,
             final_url=normalized.get("_final_url") or source_url,
             redirect_chain_list=normalized.get("_redirect_chain") or [],
-            application_url=normalized.get("application_url") or source_url,
+            application_url=application_url or None,
             url_status=normalized.get("url_status", UrlStatus.VALID.value),
             url_validated_at=utcnow(),
             provenances_list=[],

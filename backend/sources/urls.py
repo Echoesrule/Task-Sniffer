@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -779,3 +780,251 @@ def _page_mentions(full_text: str, needle: str, *, bodies: tuple[str, ...] = ())
     # tolerate plausible-token-rate of 2/3
     matches = sum(1 for t in tokens if t in haystack)
     return matches >= max(1, int(len(tokens) * 2 / 3))
+
+
+#: query params that, when present, pin a URL to a specific posting.
+_CANDIDATE_IDENTITY_PARAMS: tuple[str, ...] = (
+    "gh_jid", "job_id", "jobid", "jid", "vacancy", "vac", "offer", "posting",
+    "position", "id", "listing", "advert",
+)
+
+#: path segments that never identify a concrete posting on their own.
+_CANDIDATE_NON_JOB_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "search", "results", "browse", "jobs", "job", "jobsearch",
+        "careers", "career", "positions", "openings", "apply", "apply-now",
+        "view", "details", "listing", "listings", "vacancies", "category",
+        "categories", "company", "companies", "profile", "about", "index",
+    }
+)
+
+
+def _job_identity_key(url: str) -> str:
+    """A conservative identity key for comparing two URLs of the same posting."""
+    parsed = urlparse(url or "")
+    query = {k.lower(): v for k, v in parse_qsl(parsed.query, keep_blank_values=False)}
+    for key in _CANDIDATE_IDENTITY_PARAMS:
+        if query.get(key):
+            return f"{key}={query[key]}"
+    segments = [
+        s.lower()
+        for s in (parsed.path or "").split("/")
+        if s and s.lower() not in _CANDIDATE_NON_JOB_SEGMENTS
+    ]
+    return segments[-1] if segments else ""
+
+
+def _same_job_identity(a: str, b: str) -> bool:
+    ka, kb = _job_identity_key(a), _job_identity_key(b)
+    if ka and kb:
+        return ka == kb
+    return True  # identity of one side unknown -> do not reject
+
+
+def _validated_web_url(candidate: str, base_url: str, allowed_domains: set[str]) -> str:
+    """Resolve + canonicalize + policy-check an in-page URL. '' when rejected.
+
+    Applies the same safety/domain/destination rules used for fetched pages so
+    URLs from canonical tags, JSON-LD, or apply anchors cannot bypass Phase 2
+    controls (SSRF, domain policy, search/-homepage/company-page rejection).
+    """
+    if not candidate:
+        return ""
+    resolved = urljoin(base_url, (candidate or "").strip())
+    if urlparse(resolved).scheme.lower() not in ("http", "https"):
+        return ""
+    url = canonicalize_url(resolved)
+    if not url:
+        return ""
+    if not is_safe_fetch_url(url):
+        return ""
+    if not allowed_domains or not _domain_allowed(url, allowed_domains):
+        return ""
+    if classify_url(url) in (UrlType.SEARCH, UrlType.CATEGORY, UrlType.COMPANY):
+        return ""
+    if (urlparse(url).path or "/") in ("", "/"):
+        return ""
+    return url
+
+
+def _each_jsonld(html: str) -> Iterable[dict[str, Any]]:
+    """Yield every JSON-LD object (dicts nested in lists / @graph / arrays)."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    def walk(node: Any) -> Iterable[dict[str, Any]]:
+        if isinstance(node, dict):
+            graph = node.get("@graph")
+            if isinstance(graph, list):
+                for item in graph:
+                    yield from walk(item)
+            yield node
+        elif isinstance(node, list):
+            for item in node:
+                yield from walk(item)
+
+    for tag in soup.find_all("script"):
+        typ = (tag.get("type") or "").lower().strip()
+        if "ld+json" not in typ:
+            continue
+        raw = (tag.string or tag.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.debug("malformed JSON-LD block skipped")
+            continue
+        yield from walk(data)
+
+
+def _is_jobposting(obj: dict[str, Any]) -> bool:
+    typ = obj.get("@type")
+    if isinstance(typ, str):
+        return typ.lower() == "jobposting"
+    if isinstance(typ, list):
+        return any(isinstance(t, str) and t.lower() == "jobposting" for t in typ)
+    return False
+
+
+def _jsonld_job_urls(html: str, base_url: str) -> list[str]:
+    """URL candidates from JobPosting.url nodes, in document order."""
+    urls: list[str] = []
+    for obj in _each_jsonld(html):
+        if not _is_jobposting(obj):
+            continue
+        u = obj.get("url")
+        if isinstance(u, str) and u.strip():
+            urls.append(u.strip())
+    return urls
+
+
+def _jsonld_application_urls(html: str, base_url: str) -> list[str]:
+    """Explicit application URLs from JSON-LD where the meaning is explicit."""
+    urls: list[str] = []
+    for obj in _each_jsonld(html):
+        for key in ("applicationUrl", "application_url", "applyUrl", "apply_url"):
+            u = obj.get(key)
+            if isinstance(u, str) and u.strip():
+                urls.append(u.strip())
+    return urls
+
+
+def extract_canonical_url(html: str, base_url: str, *, allowed_domains: set[str],
+                          detail_url: str = "") -> str:
+    """Canonical identity URL: link[rel=canonical] then JSON-LD JobPosting.url.
+
+    Candidates are validated against safety/domain/destination policy and must
+    not point at a different posting's identity, or they are discarded.
+    """
+    from bs4 import BeautifulSoup
+
+    detail = canonicalize_url(detail_url or base_url)
+    candidates: list[str] = []
+
+    soup = BeautifulSoup(html, "html.parser")
+    for link in soup.find_all("link", href=True):
+        rels = link.get("rel") or []
+        rels = rels if isinstance(rels, list) else [rels]
+        if any(str(r).lower() == "canonical" for r in rels):
+            href = str(link.get("href", "")).strip()
+            if href:
+                candidates.append(href)
+
+    candidates.extend(_jsonld_job_urls(html, base_url))
+
+    if not candidates:
+        return ""
+
+    seen: set[str] = set()
+    for cand in candidates:
+        url = _validated_web_url(cand, base_url, allowed_domains)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if url == detail:
+            continue  # adds no information
+        if not _same_job_identity(detail, url):
+            logger.info("canonical candidate rejected (different job identity): %s", url)
+            continue
+        return url
+    return ""
+
+
+def find_explicit_apply_url(html: str, base_url: str, *, allowed_domains: set[str]) -> str:
+    """Locate an explicit 'apply' target on a job page.
+
+    Returns the first apply link that passes the shared safety/domain policy or
+    ``""`` when none is trustworthy. Never invents a URL.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for anchor in soup.find_all("a", href=True):
+        text = anchor.get_text(" ", strip=True).lower()
+        href = str(anchor.get("href", "")).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        if "apply" in text or "submit" in text or re.search(r"apply", href, re.I):
+            full = urljoin(base_url, href)
+            url = _validated_web_url(full, base_url, allowed_domains)
+            if url:
+                return url
+    return ""
+
+
+@dataclass
+class UrlSignals:
+    """Validated URLs extracted from a fetched job page (Phase 3)."""
+
+    canonical_url: str = ""
+    application_url: str = ""
+    notes: list[str] = field(default_factory=list)
+
+
+def extract_url_signals(html: str, base_url: str, *, allowed_domains: set[str],
+                        apply_hint: str = "", detail_url: str = "") -> UrlSignals:
+    """Resolve detail/canonical/application semantics for one fetched page.
+
+    - ``canonical_url``: preferred identity URL when reliably established.
+    - ``application_url``: explicit application destination when one is found;
+      otherwise left empty. Never fabricated and never set to the detail URL.
+    Precedence for application evidence: adapter ``apply_hint`` > explicit apply
+    anchor > explicit JSON-LD application field. Every candidate must pass the
+    shared safety/domain/destination policy.
+    """
+    detail = canonicalize_url(detail_url or base_url) or base_url
+    notes: list[str] = []
+
+    canonical_url = extract_canonical_url(
+        html, base_url, allowed_domains=allowed_domains, detail_url=detail,
+    )
+
+    application_url = ""
+    if apply_hint:
+        candidate = _validated_web_url(apply_hint, base_url, allowed_domains)
+        if candidate:
+            application_url = candidate
+        else:
+            notes.append("adapter apply_hint rejected by safety/domain policy")
+
+    if not application_url:
+        candidate = find_explicit_apply_url(html, base_url, allowed_domains=allowed_domains)
+        if candidate:
+            application_url = candidate
+
+    if not application_url:
+        for candidate in _jsonld_application_urls(html, base_url):
+            application_url = _validated_web_url(candidate, base_url, allowed_domains)
+            if application_url:
+                break
+
+    if application_url and application_url == detail:
+        application_url = ""
+
+    return UrlSignals(
+        canonical_url=canonical_url,
+        application_url=application_url,
+        notes=notes,
+    )
