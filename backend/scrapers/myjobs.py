@@ -68,11 +68,15 @@ class MyJobsKenyaScraper(JobSource):
             if href and not href.startswith("http"):
                 href = f"{self.BASE_URL}{href}"
 
+            slug = href.rstrip("/").rsplit("/", 1)[-1] if href else ""
+            source_job_id = slug if slug and slug not in ("job", "jobs") else None
+
             jobs.append({
                 "title": title_text,
                 "company": company,
                 "location": location,
                 "url": href,
+                "source_job_id": source_job_id,
                 "posted_at": posted_at,
                 "source": self.name,
             })

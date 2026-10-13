@@ -61,6 +61,7 @@ class JobicyScraper(JobSource):
                     "company": company_name,
                     "location": location or "Remote",
                     "url": item.get("url", ""),
+                    "source_job_id": str(item.get("id")) if item.get("id") is not None else None,
                     "description": item.get("jobDescription", ""),
                     "salary_currency": salary_currency,
                     "salary_min": int(salary_min) if salary_min else None,

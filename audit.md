@@ -516,3 +516,114 @@ already exist; no migration was needed. No DB records were changed.
   not exist) and historical audit/repair.
 - Remove dead `resolve_redirects` / `request_with_redirect` (L4 from Phase 2).
 - Open security items deferred to Phase 5: DNS fail-open and rebinding/TOCTOU.
+
+---
+
+# Phase 4 — Source Configuration, ATS Reliability, Deduplication, Data Repair
+
+**Status:** Implemented. No production records were modified; the historical
+audit is strictly read-only. No schema migration.
+
+## 1. Source-specific domain policies (`backend/scrapers/policy.py`)
+
+New adapters declare `job_url_patterns` / `allowed_domains` on the class. The
+legacy scrapers (`greenhouse`, `ashby`, `jobicy`, `myjobskenya`) now get an
+explicit, evidence-based `SourcePolicy` applied by `_LegacyAdapter.__init__`:
+
+| source | allowed domains | job-detail rule | identity param |
+|---|---|---|---|
+| greenhouse | `greenhouse.io` | `job-boards.greenhouse.io/<board>/jobs/<id>` | `gh_jid` |
+| ashby | `ashbyhq.com` | `jobs.ashbyhq.com/<board>/<id>` | — |
+| jobicy | `jobicy.com` | `/jobs/<id>-<slug>` | — |
+| myjobskenya | `myjobskenya.com` | `/job/<slug>` | — |
+
+`source_policy_report()` reports every registered source as
+`adapter` / `legacy` / `unconfigured`; `unconfigured_sources()` surfaces the gap.
+Current unconfigured sources: **`brightermonday`, `careerpointkenya`,
+`wellfound`** (no adapter, no policy). An empty policy stays fail-closed.
+
+## 2. ATS URL construction fixes (part 2)
+
+- `greenhouse._fetch_board` now derives the detail URL from `board + id`
+  (`job-boards.greenhouse.io/<board>/jobs/<id>`), sets `source_job_id`, and only
+  falls back to `absolute_url` when it is verifiably an individual posting
+  (`is_greenhouse_detail_url`). Search/careers URLs (`stripe.com/jobs/search`,
+  `careers.airbnb.com/positions/...`) are rejected and the row is emitted with
+  no URL rather than a wrong one; a warning is logged.
+- `ashby._fetch_board` derives `jobs.ashbyhq.com/<board>/<id>`, sets
+  `source_job_id`, and rejects non-posting `jobUrl`/`url` values.
+- `jobicy` and `myjobskenya` now emit `source_job_id` (Jobicy `id`; MyJobsKenya
+  derived from the `/job/<slug>` path).
+- `build_adapter` raises typed `UnconfiguredSourceError` for unsupported
+  sources. `IngestionEngine.run_source` catches adapter-construction failures,
+  records an `ingestion_errors` row (`stage="adapter"`), and returns **without
+  pausing** the source so it resumes once configuration is fixed.
+
+## 3. Deduplication repair (part 3)
+
+`JobDeduplicator` was rewritten against the current ORM (the previous version
+issued raw SQL against an `AsyncSession`, called a missing `execute_one`, and
+referenced non-existent columns; it was unused). Precedence now mirrors the
+engine: (1) same source + `source_job_id`, (2) cross-source `fingerprint`,
+(3) exact `canonical_url`/`original_url`. Fuzzy matching is only a fallback in
+the pure `deduplicate_batch`, never a broadener in `find_duplicates`. Merging is
+non-destructive (provenance union + blank-field fill; no row deleted).
+
+Engine (`_persist_job`) additions: conservative exact-URL dedup step, and an
+inner savepoint around the new-job flush that converts a unique-constraint
+`IntegrityError` into a provenance merge on the winning `(source_id,
+source_job_id)` row instead of failing the job.
+
+## 4. Historical audit (part 4) — read-only
+
+`scripts/audit_job_urls.py` opens SQLite in `mode=ro`, auto-detects the current
+vs legacy schema, and emits a JSON report plus proposed (never applied) repair
+actions with confidence/reason/rollback. Output goes to gitignored
+`data/audit/`. Nothing is guessed: when the Greenhouse board slug was never
+persisted, rows are `manual_review`, not auto-repaired.
+
+| DB | schema | jobs | actions | notable issues |
+|---|---|---|---|---|
+| `work_bot_hunter.db` | current | 56 | 50 manual_review, 6 none | 50 greenhouse rows missing `source_url` (only `careers.airbnb.com/positions/<id>` in `application_url`; board slug absent) |
+| `work_hunter.db` | legacy | 1366 | 1202 none, 164 manual_review | 164 rows with `gh_jid` but no board slug (99 at `stripe.com/jobs/search`, 65 `cribl.io`) |
+
+No writes: DB mtime unchanged; connection is `file:...?mode=ro`.
+
+## 5. Observability (part 5)
+
+- Adapter construction failure -> `logger.error("[<src>] adapter unavailable: ...")`
+  plus an `ingestion_errors` row.
+- Legacy source without a policy -> `logger.warning(...)` and fail-closed.
+- ATS scrapers warn when a URL is withheld.
+- End-of-run summary: `seen/new/updated/dup/invalid/review/errors`.
+- Rejections already logged via `withheld <url> (<status>): <reason>`; non-VALID
+  persists are refused with a log.
+
+## 6. Tests (part 6)
+
+- `tests/unit/test_source_policies.py` — policy coverage, report shape,
+  unconfigured surfacing, fail-closed, typed error.
+- `tests/unit/test_ats_url_construction.py` — detail-URL recognisers,
+  Greenhouse/Ashby construction, search/careers rejection, `source_job_id`
+  propagation through `_LegacyAdapter`.
+- `tests/unit/test_dedup.py` (extended) — identity precedence, batch dedup
+  (exact + fuzzy + distinct), ORM `find_duplicates`.
+- `tests/unit/test_url_audit.py` — schema detection, read-only guarantee,
+  missing-`source_url` and `gh_jid` findings, no guessed URLs.
+- `tests/unit/test_ingestion.py` (extended) — unconfigured source reported, not
+  crashed.
+
+```
+.venv/bin/python -m pytest tests -q
+```
+
+Result: **164 passed** (138 prior + 26 new), 0 failures.
+
+## 7. Deliberately not done
+
+- No historical record was rewritten; the repair plan is a proposal only and
+  requires explicit approval before any application.
+- No guessed Greenhouse board slugs.
+- DNS fail-open / rebinding (TOCTOU) and dead-code removal remain deferred to
+  the security phase.
+

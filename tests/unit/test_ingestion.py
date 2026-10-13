@@ -292,3 +292,35 @@ def test_run_source_error_isolation(tmp_path):
     assert len(rows) == 2
     assert "persist boom" in errors[0].error_message
     assert errors[0].stage == "process"
+
+
+def test_run_source_reports_unconfigured_source(tmp_path):
+    """A source with no adapter/policy is reported, not crashed on (Phase 4)."""
+
+    from backend.scrapers.factory import build_adapter
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t7.db'}")
+    _run(db.init_db())
+
+    async def scenario():
+        engine = IngestionEngine(
+            db.async_session_factory,
+            registry=SourceRegistry(),
+            adapter_factory=build_adapter,
+            max_jobs_per_source=5,
+        )
+        engine._registry.register(_approved("careerpointkenya"))
+        result = await engine.run_source("careerpointkenya")
+        async with db.async_session_factory() as session:
+            errors = (await session.execute(select(IngestionError))).scalars().all()
+            jobs = (await session.execute(select(Job))).scalars().all()
+        return result, errors, jobs
+
+    result, errors, jobs = _run(scenario())
+    _run(db.close())
+    assert result.errors == 1
+    assert result.paused is False
+    assert result.new_jobs == 0
+    assert any("no adapter" in m for m in result.error_messages)
+    assert jobs == []
+    assert errors and errors[0].stage == "adapter"

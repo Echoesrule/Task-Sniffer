@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.models.database import IngestionError, Job, Source
@@ -139,7 +140,23 @@ class IngestionEngine:
             return result
 
         limiter = RateLimiter(config)
-        adapter = self._adapter_factory(config)
+        try:
+            adapter = self._adapter_factory(config)
+        except Exception as exc:  # noqa: BLE001 - config/construction failure
+            # A source with no adapter or policy is a configuration defect, not
+            # a transient fetch failure. Report it clearly and leave the source
+            # unpaused so it resumes once configuration is fixed.
+            result.errors += 1
+            result.error_messages.append(str(exc))
+            logger.error("[%s] adapter unavailable: %s", name, exc)
+            if not self.dry_run:
+                async with self._sf() as session:
+                    source_row = await self._get_or_create_source(session, config)
+                    await self._record_error(session, source_row, stage="adapter", exc=exc)
+                    self._mark_source_error(session, source_row, str(exc))
+                    await session.commit()
+            result.finished_at = utcnow().isoformat()
+            return result
 
         async with self._sf() as session:
             source_row = await self._get_or_create_source(session, config)
@@ -217,6 +234,11 @@ class IngestionEngine:
             await adapter.close()
             result.finished_at = utcnow().isoformat()
             await session.commit()
+            logger.info(
+                "[%s] run done seen=%d new=%d updated=%d dup=%d invalid=%d review=%d errors=%d",
+                name, result.listings_seen, result.new_jobs, result.updated_jobs,
+                result.duplicates, result.invalid_urls, result.review_urls, result.errors,
+            )
             return result
 
     # ------------------------------------------------------------------
@@ -287,6 +309,7 @@ class IngestionEngine:
         outcome.new += persisted.new
         outcome.updated += persisted.updated
         outcome.duplicates += persisted.dup
+        outcome.errors += persisted.errors
         return outcome
 
     async def _resolve_candidate_url(self, adapter: JobSourceAdapter, item: ListingItem, config: SourceConfig) -> dict[str, Any] | None:
@@ -458,6 +481,23 @@ class IngestionEngine:
                 out.dup += 1
                 return out
 
+        # 2b) conservative canonical/original URL identity: an *exact* URL match
+        # is a strong duplicate signal (e.g. the same ATS posting surfaced by a
+        # second source). Fuzzy matching is deliberately not used here.
+        if canonical_url and canonical_url != source_url:
+            url_dup = (
+                await session.execute(
+                    select(Job).where(
+                        (Job.canonical_url == canonical_url)
+                        | (Job.original_url == canonical_url)
+                    ).limit(1)
+                )
+            ).scalars().first()
+            if url_dup is not None:
+                await self._merge_provenance(session, url_dup, source_row.name, source_url)
+                out.dup += 1
+                return out
+
         # 3) new job
         job = Job(
             source_id=source_row.id,
@@ -486,8 +526,35 @@ class IngestionEngine:
             fingerprint=fingerprint,
             scraped_at=datetime.now(timezone.utc),
         )
-        session.add(job)
-        await session.flush()
+        try:
+            # inner savepoint: a unique-constraint race rolls back only this
+            # insert, leaving the caller's per-job savepoint usable.
+            async with session.begin_nested():
+                session.add(job)
+                await session.flush()
+        except IntegrityError:
+            # (source_id, source_job_id) already exists (concurrent run).
+            # Fall back to merging into the winning row.
+            logger.info(
+                "[%s] duplicate insert for %s; merging into existing row",
+                source_row.name, source_job_id or fingerprint,
+            )
+            row = (
+                await session.execute(
+                    select(Job).where(
+                        Job.source_id == source_row.id,
+                        Job.source_job_id == source_job_id or fingerprint,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                out.errors += 1
+                return out
+            await self._merge_provenance(session, row, source_row.name, source_url)
+            if normalized.get("_final_url") and not row.final_url:
+                row.final_url = normalized["_final_url"]
+            out.dup += 1
+            return out
         await self._merge_provenance(session, job, source_row.name, source_url)
         out.new += 1
         return out
@@ -610,6 +677,7 @@ class _PersistOutcome:
     new: int = 0
     updated: int = 0
     dup: int = 0
+    errors: int = 0
 
 
 def _page_title(html: str) -> str:

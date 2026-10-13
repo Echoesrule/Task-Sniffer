@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from backend.scrapers.adapter import JobSourceAdapter, ListingItem
+from backend.scrapers.policy import get_policy
 from backend.sources.models import SourceConfig
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,14 @@ _LEGACY_SCRAPERS: dict[str, str] = {
 }
 
 
+class UnconfiguredSourceError(RuntimeError):
+    """Raised when a source has no adapter *and* no URL/domain policy.
+
+    Kept distinct from a generic KeyError so the engine can report the source
+    as unconfigured rather than treating it as a transient failure.
+    """
+
+
 def build_adapter(config: SourceConfig) -> JobSourceAdapter:
     """Return the adapter for a source config, raising for unsupported sources."""
     from backend.scrapers.adapters import ADAPTER_CLASSES
@@ -33,7 +42,10 @@ def build_adapter(config: SourceConfig) -> JobSourceAdapter:
     if config.name in _LEGACY_SCRAPERS:
         return _LegacyAdapter(config, _LEGACY_SCRAPERS[config.name])
 
-    raise KeyError(f"no adapter registered for source '{config.name}'")
+    raise UnconfiguredSourceError(
+        f"source '{config.name}' has no adapter class or legacy policy; "
+        "register a policy/adapter or disable the source"
+    )
 
 
 class _LegacyAdapter(JobSourceAdapter):
@@ -45,6 +57,17 @@ class _LegacyAdapter(JobSourceAdapter):
     def __init__(self, config: SourceConfig, legacy_class: str) -> None:
         super().__init__(config)
         self._legacy_class = legacy_class
+        # Apply the explicit, evidence-based policy for this legacy source.
+        # An absent/empty policy leaves the class defaults ([]), which the
+        # engine treats as fail-closed rather than "allow any domain".
+        policy = get_policy(config.name)
+        if policy is not None:
+            self.job_url_patterns = list(policy.job_url_patterns)
+            self.allowed_domains = list(policy.allowed_domains)
+        else:
+            logger.warning(
+                "[%s] no URL/domain policy configured; failing closed", config.name
+            )
         self._legacy: Any = self._make_legacy()
 
     def _make_legacy(self) -> Any:
