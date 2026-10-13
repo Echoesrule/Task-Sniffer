@@ -57,6 +57,32 @@ _JOB_KEYWORDS: frozenset[str] = frozenset(
 _SLUG_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]{2,}$", re.IGNORECASE)
 _URL_TITLE_PARAM = re.compile(r"(job-title|job_title|title|slug|name)=", re.IGNORECASE)
 
+#: Explicit, source-aware job-detail URL shapes for third-party ATS providers.
+#: Each entry pairs a host pattern with the path shape of a concrete posting.
+#: These are intentionally narrow; a board landing page (fewer segments) is not
+#: matched. They exist so valid jobs are not rejected merely because their path
+#: lacks the generic words "job"/"jobs"/"careers".
+_ATS_DETAIL_PATTERNS: tuple[tuple[re.Pattern[str], re.Pattern[str]], ...] = (
+    # Ashby: https://jobs.ashbyhq.com/<board>/<posting-id>
+    (re.compile(r"(?:^|\.)jobs\.ashbyhq\.com$", re.I), re.compile(r"^/[^/]+/[^/]+/?$")),
+    # Workable: https://apply.workable.com/<company>/j/<posting-id>/
+    (re.compile(r"(?:^|\.)apply\.workable\.com$", re.I), re.compile(r"^/[^/]+/j/[^/]+/?$")),
+    # Remotive: https://remotive.com/remote-jobs/<category>/<slug>
+    (re.compile(r"(?:^|\.)remotive\.com$", re.I), re.compile(r"^/remote-jobs/[^/]+/[^/]+/?$")),
+    # Lever: https://jobs.lever.co/<company>/<posting-uuid>
+    (re.compile(r"(?:^|\.)jobs\.lever\.co$", re.I), re.compile(r"^/[^/]+/[0-9a-f-]{8,}/?$")),
+)
+
+
+def _is_ats_detail(parsed) -> bool:
+    """True when ``parsed`` matches a known ATS concrete-posting URL shape."""
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    return any(
+        host_re.search(host) and path_re.match(path)
+        for host_re, path_re in _ATS_DETAIL_PATTERNS
+    )
+
 
 def _keyword_of(segment: str) -> str:
     seg = segment.lower()
@@ -205,6 +231,9 @@ def is_same_domain(url_a: str, url_b: str) -> bool:
 def _classify_path(url: str) -> UrlType:
     parsed = urlparse(url)
     path = parsed.path or "/"
+
+    if _is_ats_detail(parsed):
+        return UrlType.JOB_DETAIL
 
     if _SEARCH_MARKERS.search(path):
         return UrlType.SEARCH

@@ -3,6 +3,32 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
+
+from backend.sources.urls import canonicalize_url
+
+#: source-specific query parameters that establish job identity.
+#: only add entries backed by clear evidence for that source.
+_SOURCE_IDENTITY_PARAMS: dict[str, tuple[str, ...]] = {
+    "greenhouse": ("gh_jid",),
+}
+
+#: generic query parameters that may establish job identity (spec §10).
+_IDENTITY_QUERY_PARAMS: frozenset[str] = frozenset(
+    {"job", "job_id", "jobid", "jid", "vacancy", "vac", "offer", "posting",
+     "position", "id", "listing", "advert"}
+)
+
+#: path segments that never identify a job on their own.
+_NON_IDENTIFYING_PATH_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "search", "results", "browse", "jobs", "job", "jobsearch",
+        "careers", "career", "positions", "position", "openings", "opening",
+        "apply", "apply-now", "view", "details", "detail", "listing",
+        "listings", "vacancies", "vacancy", "category", "categories",
+        "company", "companies", "profile", "about", "index",
+    }
+)
 
 
 TECH_SKILL_MAP: dict[str, list[str]] = {
@@ -154,7 +180,7 @@ class JobNormalizer:
             url = self._normalize_url(url)
 
         return {
-            "source_job_id": self._extract_source_job_id(url, company, title),
+            "source_job_id": self._extract_source_job_id(url, company, title, source),
             "title": title,
             "company": company,
             "location": location,
@@ -198,19 +224,43 @@ class JobNormalizer:
         return " ".join(normalized)
 
     def _normalize_url(self, url: str) -> str:
-        url = url.strip()
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        url = re.sub(r"\?.*$", "", url)
-        return url
+        """Normalize scheme/host/path without destroying job identity.
+
+        Query parameters are preserved except for an explicit tracking policy
+        (handled by ``canonicalize_url``). Identity parameters such as
+        ``gh_jid`` or ``job_id`` therefore survive normalization.
+        """
+        url = (url or "").strip()
+        if not url:
+            return ""
+        return canonicalize_url(url)
 
     @staticmethod
-    def _extract_source_job_id(url: str, company: str, title: str) -> str:
-        if url:
-            parts = url.rstrip("/").split("/")
-            for part in reversed(parts):
-                if part and len(part) > 1:
-                    return part
+    def _extract_source_job_id(
+        url: str, company: str, title: str, source: str = ""
+    ) -> str:
+        parsed = urlparse(url or "")
+        query = {
+            key.lower(): value
+            for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+        }
+
+        for param in _SOURCE_IDENTITY_PARAMS.get((source or "").lower(), ()):
+            if query.get(param):
+                return query[param]
+
+        for param in _IDENTITY_QUERY_PARAMS:
+            if query.get(param):
+                return query[param]
+
+        path = parsed.path or ""
+        for part in reversed([s for s in path.split("/") if s]):
+            if len(part) <= 1:
+                continue
+            if part.lower() in _NON_IDENTIFYING_PATH_SEGMENTS:
+                continue
+            return part
+
         raw = f"{company}|{title}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
