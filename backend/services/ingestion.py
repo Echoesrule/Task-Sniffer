@@ -36,12 +36,12 @@ from backend.sources.urls import (
     CandidateLink,
     canonicalize_url,
     classify_url,
+    fetch_with_policy,
     identify_job_url,
-    resolve_redirects,
+    looks_like_html,
     validate_job_page,
 )
 
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +169,16 @@ class IngestionEngine:
                 if jobs_seen >= limit:
                     break
                 try:
-                    outcome = await self._process_listing(
-                        session=session,
-                        config=config,
-                        adapter=adapter,
-                        item=item,
-                        source_row=source_row,
-                    )
+                    # savepoint per job: a failed persist rolls back only this
+                    # job, never poisoning the run's transaction.
+                    async with session.begin_nested():
+                        outcome = await self._process_listing(
+                            session=session,
+                            config=config,
+                            adapter=adapter,
+                            item=item,
+                            source_row=source_row,
+                        )
                     jobs_seen += 1
                     result.new_jobs += outcome.new
                     result.updated_jobs += outcome.updated
@@ -251,30 +254,37 @@ class IngestionEngine:
         # carry URL-pipeline provenance through the normalizer's fixed schema
         normalized["url_status"] = raw.get("url_status") or UrlStatus.VALID.value
         normalized["source_url"] = candidate["url"]
+        normalized["_original_url"] = candidate["url"]
         normalized["application_url"] = raw.get("application_url") or ""
         normalized["_final_url"] = raw.get("_final_url")
         normalized["_redirect_chain"] = raw.get("_redirect_chain") or []
         normalized["_http_status"] = raw.get("_http_status")
         normalized["source"] = config.name
+        outcome.job = normalized
+
+        # --- validation gate: only VALID candidates enter normal storage ---
+        if validation is None or not validation.ok:
+            status = validation.status if validation is not None else UrlStatus.NEEDS_REVIEW
+            reason = validation.reason if validation is not None else "not validated"
+            if status == UrlStatus.INVALID:
+                outcome.invalid += 1
+            else:
+                outcome.review += 1
+            logger.info(
+                "[%s] withheld %s (%s): %s",
+                config.name, candidate["url"], status.value, reason,
+            )
+            return outcome
 
         # --- persist / dedup ---------------------------------------------
         if self.dry_run:
             outcome.new += 1
-            outcome.job = normalized
             return outcome
 
         persisted = await self._persist_job(session, source_row, normalized, candidate, item)
-        outcome.job = normalized
         outcome.new += persisted.new
         outcome.updated += persisted.updated
         outcome.duplicates += persisted.dup
-        if validation is not None and not validation.ok:
-            if validation.status == UrlStatus.INVALID:
-                outcome.invalid += 1
-            else:
-                outcome.review += 1
-        elif validation is not None:
-            outcome.review += 1 if not validation.checks.get("has_job_content") else 0
         return outcome
 
     async def _resolve_candidate_url(self, adapter: JobSourceAdapter, item: ListingItem, config: SourceConfig) -> dict[str, Any] | None:
@@ -308,31 +318,40 @@ class IngestionEngine:
     async def _fetch_and_validate(
         self, adapter: JobSourceAdapter, item: ListingItem, url: str
     ) -> tuple[dict[str, Any], Any]:
-        """Fetch the detail page once, resolve redirects, run the §8 checklist."""
-        allowed_domains = {d for d in adapter.allowed_domains if d}
-        if not allowed_domains:
-            host = urlparse(url).netloc.split(":")[0]
-            if host:
-                allowed_domains = {host}
+        """Fetch the detail page once, resolve redirects, run the §8 checklist.
+
+        Validation is the persistence gate: only a ``VALID`` result is eligible
+        for normal storage. Fetch-level uncertainty (SSRF policy, redirect
+        loops, timeouts, 403/429) yields ``NEEDS_REVIEW`` and never overwrites
+        an existing valid record.
+        """
+        allowed_domains = adapter.expected_domains()
 
         client = adapter._client
-        try:
-            response = await client.get(url)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[%s] detail fetch failed %s: %s", adapter.name, url, exc)
+        response, final_url, chain, fetch_error = await fetch_with_policy(
+            client,
+            url,
+            max_redirects=getattr(adapter, "max_redirects", 5),
+            resolve_dns=True,
+        )
+
+        if response is None:
             validation = validate_job_page(
-                url=url, status_code=0,
-                allowed_domains=allowed_domains or None,
+                url=final_url, status_code=0, allowed_domains=allowed_domains,
             )
-            validation.reason = f"fetch error: {exc}"
+            validation.ok = False
+            if "unsafe" in (fetch_error or ""):
+                validation.status = UrlStatus.INVALID
+            else:
+                validation.status = UrlStatus.NEEDS_REVIEW
+            validation.reason = fetch_error or "fetch failed"
             return {}, validation
 
-        final_url = str(response.url) if response.url else url
-        chain = [u for u in ([url] + [h.headers.get("location", "") for h in response.history]) if u]
-
-        html = response.text if response.status_code == 200 else ""
+        html = response.text if 200 <= response.status_code < 300 else ""
         page_title = _page_title(html)
         body_text = _body_text(html)
+        content_type = response.headers.get("content-type", "")
+        is_html = looks_like_html(content_type, response.text)
 
         validation = adapter.validate_page(
             url=final_url,
@@ -341,10 +360,12 @@ class IngestionEngine:
             body_text=body_text,
             expected_title=item.title,
             expected_company=item.company,
+            content_type=content_type,
+            is_html=is_html,
         )
 
         detail: dict[str, Any] = {}
-        if response.status_code == 200 and html:
+        if validation.ok and response.status_code == 200 and html:
             try:
                 parsed = await adapter.parse_detail(html, final_url)
                 detail = parsed or {}
@@ -366,12 +387,21 @@ class IngestionEngine:
         candidate: dict[str, Any],
         item: ListingItem,
     ) -> "_PersistOutcome":
-        """Insert or update the job, dedup against existing records."""
+        """Insert or update the job, dedup against existing records.
+
+        Defensive gate: a non-VALID candidate must never create a normal job or
+        overwrite a previously validated record's URLs.
+        """
         out = _PersistOutcome()
+
+        if normalized.get("url_status", UrlStatus.VALID.value) != UrlStatus.VALID.value:
+            logger.info("refusing to persist non-VALID candidate %s", normalized.get("source_url", ""))
+            return out
 
         fingerprint = normalized.get("fingerprint", "")
         source_job_id = normalized.get("source_job_id", "")
         source_url = normalized.get("source_url", "") or candidate.get("url", "")
+        original_url = normalized.get("_original_url") or source_url
 
         # 1) exact re-scrape of same source+id -> update URL fields
         if source_job_id:
@@ -386,10 +416,13 @@ class IngestionEngine:
             if existing is not None:
                 existing.source_url = source_url
                 existing.canonical_url = source_url
+                existing.original_url = existing.original_url or original_url
                 if normalized.get("_final_url"):
                     existing.final_url = normalized["_final_url"]
                 if normalized.get("application_url"):
                     existing.application_url = normalized["application_url"]
+                existing.url_status = UrlStatus.VALID.value
+                existing.url_validated_at = utcnow()
                 existing.scraped_at = datetime.now(timezone.utc)
                 out.updated += 1
                 return out
@@ -403,7 +436,9 @@ class IngestionEngine:
             ).scalars().first()
             if dup is not None:
                 await self._merge_provenance(session, dup, source_row.name, source_url)
-                if normalized.get("_final_url"):
+                if normalized.get("_final_url") and (
+                    not dup.final_url or dup.url_status != UrlStatus.VALID.value
+                ):
                     dup.final_url = normalized["_final_url"]
                 out.dup += 1
                 return out
@@ -426,6 +461,7 @@ class IngestionEngine:
             salary_currency=normalized.get("salary_currency"),
             source_url=source_url,
             canonical_url=source_url,
+            original_url=original_url,
             final_url=normalized.get("_final_url") or source_url,
             redirect_chain_list=normalized.get("_redirect_chain") or [],
             application_url=normalized.get("application_url") or source_url,
@@ -574,6 +610,8 @@ def _body_text(html: str) -> str:
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "template"]):
+            tag.decompose()
         return " ".join(soup.get_text(" ", strip=True).split())[:6000]
     except Exception:  # noqa: BLE001
         return ""

@@ -8,8 +8,11 @@ The first `<a>`/first URL on a listing is NEVER trusted as the job URL.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
@@ -82,6 +85,211 @@ def _is_ats_detail(parsed) -> bool:
         host_re.search(host) and path_re.match(path)
         for host_re, path_re in _ATS_DETAIL_PATTERNS
     )
+
+
+#: anti-bot / interstitial markers: HTTP 200 pages that are not real content.
+_ANTI_BOT_MARKERS = re.compile(
+    r"(just a moment|checking your browser|enable javascript and cookies|"
+    r"attention required|cf-browser-verification|"
+    r"verify you are human|are you a robot|captcha|ddos protection|"
+    r"unusual traffic)",
+    re.IGNORECASE,
+)
+
+#: explicit removed/expired job indicators.
+_REMOVED_MARKERS = re.compile(
+    r"(no longer accepting applications|this job has expired|"
+    r"position has been filled|this posting is closed|"
+    r"job (?:is )?no longer available|the job you are looking for|"
+    r"this (?:position|role|job) is (?:now )?closed|"
+    r"applications? (?:are )?closed)",
+    re.IGNORECASE,
+)
+
+
+def _is_anti_bot(page_title: str, body_text: str) -> bool:
+    return bool(_ANTI_BOT_MARKERS.search(f"{page_title} {body_text[:5000]}"))
+
+
+def _is_removed(page_title: str, body_text: str) -> bool:
+    return bool(_REMOVED_MARKERS.search(f"{page_title} {body_text[:5000]}"))
+
+
+def looks_like_html(content_type: str, body: str = "") -> bool:
+    """Whether a response should be treated as an HTML job page.
+
+    An unknown/empty content type is treated permissively (many servers omit
+    it); an explicit non-HTML type is only accepted when the body is clearly an
+    HTML document (some servers mislabel HTML as ``text/plain``).
+    """
+    content_type = (content_type or "").strip().lower()
+    if not content_type:
+        return True
+    if "html" in content_type:
+        return True
+    if "xml" in content_type:
+        head = (body or "").lstrip()[:200].lower()
+        return head.startswith("<!doctype") or head.startswith("<html") or "<html" in head
+    if content_type.startswith(("text/plain", "application/json", "application/octet-stream")):
+        head = (body or "").lstrip()[:200].lower()
+        return head.startswith("<!doctype") or head.startswith("<html") or "<html" in head
+    return True
+
+
+#: ports a job fetch is permitted to use; everything else is refused to avoid
+#: turning the fetcher into an internal port scanner.
+_ALLOWED_PORTS: frozenset[int] = frozenset({80, 443, 8080, 8443})
+
+
+def _parse_host_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse a host into an IP, tolerating legacy decimal/hex/octal literals."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    lowered = host.lower()
+    # shorthand dotted forms ("127.1", "10.1", "2130706433") accepted by inet_aton
+    if re.fullmatch(r"\d+(\.\d+){0,3}", host):
+        try:
+            return ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, ValueError, OverflowError):
+            return None
+    try:
+        if lowered.startswith("0x"):
+            return ipaddress.ip_address(int(lowered, 16))
+        if lowered.isdigit():
+            return ipaddress.ip_address(int(lowered, 8) if lowered.startswith("0") else int(lowered))
+    except (ValueError, OverflowError):
+        return None
+    return None
+
+
+def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _resolve_host_ips(host: str) -> set[str]:
+    """Resolve a hostname to its IP literals (best-effort; empty on failure)."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError, OSError, ValueError):
+        return set()
+    ips: set[str] = set()
+    for info in infos:
+        addr = info[4][0]
+        if isinstance(addr, str):
+            ips.add(addr.split("%", 1)[0])
+    return ips
+
+
+#: hosts under these special-use domains can never resolve publicly, so the
+#: DNS safety check is skipped for them (also keeps tests fast/deterministic).
+_NON_RESOLVABLE_SUFFIXES = (
+    ".example",
+    ".example.com",
+    ".example.net",
+    ".example.org",
+    ".invalid",
+    ".test",
+    ".localhost",
+)
+
+_DNS_CACHE: dict[str, frozenset[str]] = {}
+_DNS_TIMEOUT = 0.75
+
+
+def _skips_dns_check(host: str) -> bool:
+    return host.endswith(_NON_RESOLVABLE_SUFFIXES)
+
+
+async def _resolve_host_ips_cached(host: str) -> frozenset[str]:
+    """Resolve via a worker thread with a timeout, caching results per process."""
+    if host in _DNS_CACHE:
+        return _DNS_CACHE[host]
+    try:
+        ips = await asyncio.wait_for(asyncio.to_thread(_resolve_host_ips, host), timeout=_DNS_TIMEOUT)
+        result = frozenset(ips)
+    except Exception:  # noqa: BLE001 - timeout/failure => treat as unresolvable
+        result = frozenset()
+    _DNS_CACHE[host] = result
+    return result
+
+
+async def _url_is_safe_async(url: str) -> bool:
+    """Static SSRF checks plus an asynchronous DNS check for hostnames."""
+    if not is_safe_fetch_url(url, resolve_dns=False):
+        return False
+    host = (urlparse(url).hostname or "").strip().lower()
+    if _parse_host_ip(host) is not None or _skips_dns_check(host):
+        return True
+    for literal in await _resolve_host_ips_cached(host):
+        try:
+            resolved = ipaddress.ip_address(literal)
+        except ValueError:
+            continue
+        if _ip_is_unsafe(resolved):
+            return False
+    return True
+
+
+def is_safe_fetch_url(url: str, *, resolve_dns: bool = False) -> bool:
+    """Reject unsafe fetch destinations (scheme, port, private IP ranges).
+
+    Checks are applied to IP literals directly (including legacy decimal, hex
+    and octal encodings and IPv4-mapped IPv6). When ``resolve_dns`` is set,
+    hostnames are also resolved and rejected if *any* resolved address is
+    private/loopback/link-local/reserved. DNS rebinding (resolution changing
+    between check and connect) remains a residual TOCTOU risk and is not
+    eliminated here.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in ("http", "https"):
+        return False
+
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is not None and port not in _ALLOWED_PORTS:
+        return False
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or host.endswith(".local")
+        or host.endswith(".internal")
+    ):
+        return False
+
+    ip = _parse_host_ip(host)
+    if ip is not None:
+        return not _ip_is_unsafe(ip)
+
+    if resolve_dns:
+        for literal in _resolve_host_ips(host):
+            try:
+                resolved = ipaddress.ip_address(literal)
+            except ValueError:
+                continue
+            if _ip_is_unsafe(resolved):
+                return False
+    return True
 
 
 def _keyword_of(segment: str) -> str:
@@ -380,6 +588,58 @@ async def resolve_redirects(client: httpx.AsyncClient, url: str) -> RedirectChai
         return RedirectChain(original_url=url, final_url=url)
 
 
+async def fetch_with_policy(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_redirects: int = 5,
+    resolve_dns: bool = True,
+) -> tuple[httpx.Response | None, str, list[str], str]:
+    """Fetch a URL, following redirects manually with a per-hop SSRF check.
+
+    Each redirect target is validated *before* the next request is issued, so
+    no request is ever sent to a loopback/private/link-local/reserved host,
+    a non-HTTP(S) scheme, or a non-web port, even as an intermediate hop.
+
+    Returns ``(response, final_url, chain, error)``. ``response`` is ``None``
+    when a hop was refused, a loop/limit was hit, or the request failed; the
+    ``error`` string distinguishes unsafe destinations from inconclusive
+    outcomes.
+    """
+    start = normalize_url(url) or url
+    chain = [start]
+    current = start
+
+    for _ in range(max_redirects + 1):
+        if resolve_dns:
+            safe = await _url_is_safe_async(current)
+        else:
+            safe = is_safe_fetch_url(current)
+        if not safe:
+            return None, current, chain, "unsafe destination (SSRF policy)"
+
+        try:
+            response = await client.get(current, follow_redirects=False)
+        except Exception as exc:  # noqa: BLE001 - surfaced as inconclusive
+            logger.debug("fetch failed %s: %s", current, exc)
+            return None, current, chain, f"fetch error: {exc}"
+
+        if response.is_redirect:
+            location = response.headers.get("location")
+            if not location:
+                return response, current, chain, ""
+            target = normalize_url(urljoin(current, location)) or urljoin(current, location)
+            if target in chain:
+                return None, current, chain, "redirect loop"
+            chain.append(target)
+            current = target
+            continue
+
+        return response, current, chain, ""
+
+    return None, current, chain, "too many redirects"
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -395,36 +655,93 @@ def validate_job_page(
     expected_company: str = "",
     allowed_domains: set[str] | None = None,
     has_job_markers: bool = False,
+    content_type: str = "",
+    is_html: bool | None = None,
 ) -> UrlValidation:
     """Validate a fetched job page against the checklist in spec §8.
 
-    Returns a UrlValidation with ``status`` one of VALID / INVALID / NEEDS_REVIEW.
+    Returns a UrlValidation whose ``status`` is one of:
+
+    * ``VALID`` - sufficient evidence the destination is a job-detail page.
+    * ``INVALID`` - affirmative evidence it is not (removed job, search page,
+      non-HTML body, ...).
+    * ``NEEDS_REVIEW`` - the repository's "unknown" bucket: inconclusive
+      evidence (timeout, 403/429, anti-bot interstitial, unexpected domain,
+      missing domain policy). Unknown candidates must not be persisted.
     """
     checks: dict[str, bool] = {}
 
-    checks["http_ok"] = 200 <= status_code < 300
-    checks["expected_domain"] = _domain_allowed(url, allowed_domains) if allowed_domains else True
-    checks["not_search_listing"] = classify_url(url) not in (UrlType.SEARCH, UrlType.CATEGORY)
+    checks["http_status"] = status_code
+    checks["expected_domain"] = _domain_allowed(url, allowed_domains) if allowed_domains else False
+    checks["not_search_listing"] = classify_url(url) not in (UrlType.SEARCH, UrlType.CATEGORY, UrlType.COMPANY)
+    checks["not_homepage"] = (urlparse(url).path or "/") not in ("", "/")
     checks["has_title"] = _page_mentions(page_title, expected_title, bodies=(body_text,)) if expected_title else True
     checks["has_company"] = _page_mentions(page_title, expected_company, bodies=(body_text,)) if expected_company else True
     checks["has_job_content"] = (len(body_text) > 120) or has_job_markers
+    checks["anti_bot"] = not _is_anti_bot(page_title, body_text)
+    checks["removed"] = not _is_removed(page_title, body_text)
+    checks["is_html"] = looks_like_html(content_type) if is_html is None else is_html
 
-    if not checks["http_ok"]:
+    # --- status-code policy -------------------------------------------------
+    if status_code == 0:
+        return UrlValidation(
+            ok=False, status=UrlStatus.NEEDS_REVIEW,
+            reason="no HTTP response (network error/timeout)", checks=checks,
+        )
+
+    if status_code in (404, 410):
+        return UrlValidation(
+            ok=False, status=UrlStatus.INVALID,
+            reason=f"job removed (HTTP {status_code})", checks=checks,
+        )
+
+    if status_code in (403, 429) or 500 <= status_code <= 599:
+        return UrlValidation(
+            ok=False, status=UrlStatus.NEEDS_REVIEW,
+            reason=f"inconclusive HTTP {status_code}", checks=checks,
+        )
+
+    if not 200 <= status_code < 300:
         return UrlValidation(
             ok=False, status=UrlStatus.INVALID,
             reason=f"HTTP {status_code}", checks=checks,
         )
 
+    # --- 2xx content policy -------------------------------------------------
+    if not checks["is_html"]:
+        return UrlValidation(
+            ok=False, status=UrlStatus.INVALID,
+            reason="response is not an HTML job page", checks=checks,
+        )
+
+    if not checks["anti_bot"]:
+        return UrlValidation(
+            ok=False, status=UrlStatus.NEEDS_REVIEW,
+            reason="anti-bot/interstitial page (not conclusive)", checks=checks,
+        )
+
+    if not checks["removed"]:
+        return UrlValidation(
+            ok=False, status=UrlStatus.INVALID,
+            reason="job posting removed/expired", checks=checks,
+        )
+
     if not checks["expected_domain"]:
         return UrlValidation(
             ok=False, status=UrlStatus.NEEDS_REVIEW,
-            reason="final URL is on an unexpected domain", checks=checks,
+            reason="final URL is on an unexpected/unconfigured domain", checks=checks,
         )
 
     if not checks["not_search_listing"]:
         return UrlValidation(
             ok=False, status=UrlStatus.INVALID,
-            reason="URL resolves to a search/listing/category page", checks=checks,
+            reason="URL resolves to a search/listing/company/category page", checks=checks,
+        )
+
+    if not checks["not_homepage"]:
+        return UrlValidation(
+            ok=False, status=UrlStatus.INVALID,
+            reason="URL resolves to a site homepage/landing page", checks=checks,
         )
 
     if not checks["has_job_content"]:
@@ -462,29 +779,3 @@ def _page_mentions(full_text: str, needle: str, *, bodies: tuple[str, ...] = ())
     # tolerate plausible-token-rate of 2/3
     matches = sum(1 for t in tokens if t in haystack)
     return matches >= max(1, int(len(tokens) * 2 / 3))
-
-
-def find_explicit_apply_url(html: str, base_url: str, *, allowed_domains: set[str]) -> str:
-    """Locate an explicit 'apply' target on a job page.
-
-    Prefers a same/related-domain apply href over external ATS links; falls back
-    to the job detail URL itself. Never invents a URL.
-    """
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(html, "html.parser")
-    apply_links: list[CandidateLink] = []
-    for anchor in soup.find_all("a", href=True):
-        text = anchor.get_text(" ", strip=True).lower()
-        href = str(anchor.get("href", "")).strip()
-        if not href or href.startswith(("#", "javascript:", "mailto:")):
-            continue
-        if "apply" in text or "submit" in text or re.search(r"apply", href, re.I):
-            full = urljoin(base_url, href)
-            apply_links.append(CandidateLink(url=full, text=text))
-
-    if not apply_links:
-        return base_url
-
-    preferred = next((l.url for l in apply_links if _domain_allowed(l.url, allowed_domains)), None)
-    return preferred or apply_links[0].url

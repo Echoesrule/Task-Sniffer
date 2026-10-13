@@ -94,6 +94,8 @@ class JobSourceAdapter(abc.ABC):
     job_url_patterns: list[str] = []
     #: hostname suffixes an apply/external link may live on ('' -> same host)
     allowed_domains: list[str] = []
+    #: hard bound on followed redirects (prevents loops / excessive chains)
+    max_redirects: int = 5
 
     def __init__(self, config: SourceConfig, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
@@ -104,8 +106,18 @@ class JobSourceAdapter(abc.ABC):
                 timeout=httpx.Timeout(timeout),
                 headers=DEFAULT_HEADERS,
                 follow_redirects=True,
+                max_redirects=self.max_redirects,
             )
         self._client = client
+
+    def expected_domains(self) -> set[str]:
+        """The trustworthy domain policy for this source (empty -> fail closed).
+
+        An empty set must NOT be interpreted as "any domain is acceptable";
+        callers use it to withhold normal persistence until the source config
+        is corrected.
+        """
+        return {d.lower().lstrip(".") for d in self.allowed_domains if d}
 
     async def fetch(self, url: str) -> str | None:
         """Fetch raw text/HTML/XML for a URL."""
@@ -135,17 +147,12 @@ class JobSourceAdapter(abc.ABC):
         body_text: str = "",
         expected_title: str = "",
         expected_company: str = "",
+        content_type: str = "",
+        is_html: bool | None = None,
     ) -> UrlValidation:
         """Validate the fetched page against expected title/company + domain."""
         from backend.sources.urls import validate_job_page
 
-        allowed = None
-        if self.allowed_domains:
-            allowed = {self.allowed_domains[0] if d == "" else d for d in self.allowed_domains}
-            allowed.discard("")
-            host = httpx.URL(url).host
-            if host:
-                allowed.add(host)
         return validate_job_page(
             url=url,
             status_code=status_code,
@@ -153,7 +160,9 @@ class JobSourceAdapter(abc.ABC):
             body_text=body_text,
             expected_title=expected_title,
             expected_company=expected_company,
-            allowed_domains=allowed,
+            allowed_domains=self.expected_domains(),
+            content_type=content_type,
+            is_html=is_html,
         )
 
     async def close(self) -> None:
