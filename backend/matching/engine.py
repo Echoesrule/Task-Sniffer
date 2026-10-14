@@ -5,6 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.skills import normalize_skill, normalize_skill_list
+
+
+def _canonical(skills: Any) -> list[str]:
+    """Canonicalize an arbitrary skill list via the shared vocabulary."""
+    return [s.lower().strip() for s in normalize_skill_list(skills)]
+
 
 class MatchingEngine:
     """Multi-stage job matching engine.
@@ -165,14 +172,8 @@ class MatchingEngine:
         Returns:
             Semantic analysis result with skill match details.
         """
-        job_skills = [
-            s.lower().strip() if isinstance(s, str) else str(s).lower()
-            for s in job.get("skills", [])
-        ]
-        candidate_skills = [
-            s.lower().strip() if isinstance(s, str) else str(s).lower()
-            for s in candidate.get("skills", [])
-        ]
+        job_skills = _canonical(job.get("skills", []))
+        candidate_skills = _canonical(candidate.get("skills", []))
 
         exact_matches: list[str] = []
         equivalent_matches: list[dict] = []
@@ -351,21 +352,22 @@ class MatchingEngine:
         Returns:
             Similarity score from 0.0 (no match) to 1.0 (exact match).
         """
-        skill_lower = skill.lower().strip()
+        skill_lower = normalize_skill(skill) or skill.lower().strip()
+        candidate = [normalize_skill(s) or s.lower().strip() for s in candidate_skills]
 
-        for candidate_skill in candidate_skills:
+        for candidate_skill in candidate:
             if skill_lower == candidate_skill:
                 return 1.0
 
         aliases = self.SKILL_ALIASES.get(skill_lower, [])
-        for candidate_skill in candidate_skills:
+        for candidate_skill in candidate:
             if candidate_skill in aliases:
                 return 0.9
             for alias in aliases:
                 if candidate_skill == alias:
                     return 0.9
 
-        for candidate_skill in candidate_skills:
+        for candidate_skill in candidate:
             if (
                 skill_lower in candidate_skill
                 or candidate_skill in skill_lower
@@ -513,14 +515,8 @@ class MatchingEngine:
 
     def _basic_skills_filter(self, job: dict, candidate: dict) -> dict:
         """Basic skills presence check."""
-        job_skills = [
-            s.lower() if isinstance(s, str) else str(s).lower()
-            for s in job.get("skills", [])
-        ]
-        candidate_skills = [
-            s.lower() if isinstance(s, str) else str(s).lower()
-            for s in candidate.get("skills", [])
-        ]
+        job_skills = _canonical(job.get("skills", []))
+        candidate_skills = _canonical(candidate.get("skills", []))
 
         if not job_skills:
             return {"score": 1.0, "reason": "No skills required"}

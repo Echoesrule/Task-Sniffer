@@ -5,6 +5,8 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+from backend.skills import analyze_skills
+from backend.skills.vocabulary import TECH_SKILL_MAP, normalize_skill_list
 from backend.sources.urls import canonicalize_url
 
 #: source-specific query parameters that establish job identity.
@@ -30,94 +32,6 @@ _NON_IDENTIFYING_PATH_SEGMENTS: frozenset[str] = frozenset(
     }
 )
 
-
-TECH_SKILL_MAP: dict[str, list[str]] = {
-    "python": ["python", "python3", "py3", "cpython", "pypy"],
-    "javascript": ["javascript", "js", "es6", "es2015", "ecmascript"],
-    "typescript": ["typescript", "ts"],
-    "java": ["java", "java se", "java ee", "jdk"],
-    "c++": ["c++", "cpp", "c plus plus"],
-    "c#": ["c#", "csharp", "c sharp", ".net", "dotnet"],
-    "go": ["golang", "go"],
-    "rust": ["rust", "rust-lang"],
-    "ruby": ["ruby", "ruby on rails", "ror", "rails"],
-    "php": ["php"],
-    "swift": ["swift", "swiftui"],
-    "kotlin": ["kotlin", "kt"],
-    "scala": ["scala"],
-    "r": [" r language", "r studio", "r programming"],
-    "dart": ["dart", "flutter"],
-    "lua": ["lua"],
-    "react": ["react", "reactjs", "react.js"],
-    "vue": ["vue", "vuejs", "vue.js"],
-    "angular": ["angular", "angularjs", "angular.js"],
-    "svelte": ["svelte", "sveltekit"],
-    "next.js": ["nextjs", "next.js", "next js"],
-    "node.js": ["nodejs", "node.js", "node js"],
-    "express": ["express", "expressjs"],
-    "django": ["django"],
-    "flask": ["flask"],
-    "fastapi": ["fastapi", "fast api"],
-    "spring": ["spring", "spring boot", "springboot"],
-    "laravel": ["laravel"],
-    "rails": ["rails", "ruby on rails"],
-    "tailwind": ["tailwind", "tailwindcss", "tailwind css"],
-    "sass": ["sass", "scss"],
-    "bootstrap": ["bootstrap"],
-    "figma": ["figma"],
-    "adobe xd": ["adobe xd", "xd"],
-    "sketch": ["sketch"],
-    "postgresql": ["postgresql", "postgres", "psql"],
-    "mysql": ["mysql", "mariadb"],
-    "mongodb": ["mongodb", "mongo"],
-    "redis": ["redis"],
-    "sqlite": ["sqlite", "sqlite3"],
-    "elasticsearch": ["elasticsearch", "elastic", "opensearch"],
-    "dynamodb": ["dynamodb", "dynamo"],
-    "firebase": ["firebase"],
-    "supabase": ["supabase"],
-    "aws": ["aws", "amazon web services", "ec2", "s3", "lambda", "sqs", "sns"],
-    "gcp": ["gcp", "google cloud", "google cloud platform", "bigquery"],
-    "azure": ["azure", "microsoft azure"],
-    "docker": ["docker"],
-    "kubernetes": ["kubernetes", "k8s"],
-    "terraform": ["terraform"],
-    "ansible": ["ansible"],
-    "jenkins": ["jenkins"],
-    "github actions": ["github actions", "gh actions"],
-    "gitlab ci": ["gitlab ci", "gitlab-ci"],
-    "circleci": ["circleci", "circle ci"],
-    "ci/cd": ["ci/cd", "ci cd", "continuous integration", "continuous deployment"],
-    "git": ["git", "github", "gitlab", "bitbucket"],
-    "linux": ["linux", "ubuntu", "debian", "centos", "alpine"],
-    "graphql": ["graphql", "gql"],
-    "rest api": ["rest api", "restful api", "rest", "api development"],
-    "grpc": ["grpc", "protobuf"],
-    "websockets": ["websockets", "websocket", "ws"],
-    "rabbitmq": ["rabbitmq", "rabbit mq"],
-    "kafka": ["kafka", "apache kafka"],
-    "nginx": ["nginx"],
-    "apache": ["apache", "apache httpd"],
-    "machine learning": ["machine learning", "ml"],
-    "deep learning": ["deep learning", "dl"],
-    "data science": ["data science", "data scientist"],
-    "nlp": ["nlp", "natural language processing"],
-    "computer vision": ["computer vision", "cv"],
-    "pandas": ["pandas"],
-    "numpy": ["numpy"],
-    "scikit-learn": ["scikit-learn", "sklearn", "scikit learn"],
-    "pytorch": ["pytorch"],
-    "tensorflow": ["tensorflow"],
-    "keras": ["keras"],
-    "hugging face": ["hugging face", "huggingface", "transformers"],
-    "jira": ["jira"],
-    "agile": ["agile", "scrum", "kanban"],
-    "confluence": ["confluence"],
-    "salesforce": ["salesforce", "sfcc", "crm"],
-    "sap": ["sap"],
-    "blockchain": ["blockchain", "web3", "solidity", "smart contracts"],
-    "cybersecurity": ["cybersecurity", "infosec", "information security", "penetration testing"],
-}
 
 KENYA_LOCATIONS: dict[str, list[str]] = {
     "Nairobi": ["nairobi", "nbi", "westlands", "karen", "kilimani", "lavington", "upperhill", "cbd"],
@@ -170,8 +84,15 @@ class JobNormalizer:
         company = self._normalize_company(job.get("company", ""))
         location = self._normalize_location(job.get("location", ""))
         salary = self._normalize_salary(job)
-        skills = self._normalize_skills(job.get("skills", []))
-        description = self._normalize_description(job.get("description", ""))
+        raw_description = job.get("description", "") or ""
+        description = self._normalize_description(raw_description)
+
+        # Extract skills from the free text, and union them with whatever the
+        # adapter supplied explicitly.  Extraction is deterministic/rules-based.
+        analysis = analyze_skills(title, raw_description)
+        provided = self._normalize_skills(job.get("skills", []))
+        skills = sorted(set(analysis.skills) | set(provided))
+
         employment_type = self._normalize_employment_type(job.get("employment_type", ""))
         experience_level = self._normalize_experience_level(title, job.get("experience_level", ""))
 
@@ -190,6 +111,9 @@ class JobNormalizer:
             "salary_min": salary.get("min"),
             "salary_max": salary.get("max"),
             "skills": skills,
+            "skills_required": analysis.required,
+            "skills_preferred": analysis.preferred,
+            "skills_detail": analysis.detail,
             "employment_type": employment_type,
             "experience_level": experience_level,
             "remote": job.get("remote", False),
@@ -348,26 +272,8 @@ class JobNormalizer:
         return None
 
     def _normalize_skills(self, skills: list[str] | str) -> list[str]:
-        if isinstance(skills, str):
-            skills = [s.strip() for s in skills.split(",") if s.strip()]
-
-        canonical_set: set[str] = set()
-        for skill in skills:
-            skill_lower = skill.lower().strip()
-            found = False
-            for canonical, aliases in TECH_SKILL_MAP.items():
-                if skill_lower == canonical:
-                    canonical_set.add(canonical)
-                    found = True
-                    break
-                if skill_lower in [a.lower() for a in aliases]:
-                    canonical_set.add(canonical)
-                    found = True
-                    break
-            if not found and skill_lower:
-                canonical_set.add(skill_lower)
-
-        return sorted(canonical_set)
+        """Canonicalize an explicitly supplied skill list via the vocabulary."""
+        return normalize_skill_list(skills)
 
     @staticmethod
     def _normalize_employment_type(raw: str) -> str:

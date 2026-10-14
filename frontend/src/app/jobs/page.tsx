@@ -4,27 +4,51 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { JobCard } from "@/components/jobs/job-card"
 import { JobCardSkeleton } from "@/components/ui/skeletons"
-import { mockJobs } from "@/data/mock"
+import { jobsService } from "@/services/api"
+import type { Job } from "@/types"
 import { motion } from "framer-motion"
-import { Search, SlidersHorizontal, X, Grid3X3, List } from "lucide-react"
+import { Search, SlidersHorizontal, X, AlertCircle } from "lucide-react"
 import { useState, useEffect } from "react"
 
-const filters = [
-  { label: "Source", options: ["All", "Greenhouse", "BrighterMonday", "MyJobs", "Jobicy", "Ashby"] },
-  { label: "Remote", options: ["All", "Remote", "Hybrid", "On-site"] },
+const baseFilters = [
+  { label: "Source", options: ["All"] },
+  { label: "Remote", options: ["All", "Remote", "On-site"] },
   { label: "Experience", options: ["All", "Junior", "Mid", "Senior"] },
   { label: "Risk", options: ["All", "Low", "Medium", "High"] },
 ]
 
 export default function JobsPage() {
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({})
   const [sortBy, setSortBy] = useState("match")
-  const [loaded, setLoaded] = useState(false)
 
-  useEffect(() => { const t = setTimeout(() => setLoaded(true), 300); return () => clearTimeout(t) }, [])
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    jobsService
+      .list({ page_size: "100" })
+      .then(res => {
+        if (cancelled) return
+        setJobs(res.jobs as Job[])
+        setError(null)
+      })
+      .catch(err => {
+        if (cancelled) return
+        setError(err?.message ?? "Failed to load jobs")
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [])
 
-  let filtered = [...mockJobs]
+  const sourceOptions = ["All", ...Array.from(new Set(jobs.map(j => j.source).filter(Boolean))).sort()]
+  const filters = baseFilters.map(f => (f.label === "Source" ? { ...f, options: sourceOptions } : f))
+
+  let filtered = [...jobs]
 
   if (search) {
     const q = search.toLowerCase()
@@ -43,9 +67,9 @@ export default function JobsPage() {
   if (activeFilters.Experience && activeFilters.Experience !== "All") {
     filtered = filtered.filter(j => j.experience?.toLowerCase() === activeFilters.Experience.toLowerCase())
   }
-  if (activeFilters.Risk === "Low") filtered = filtered.filter(j => j.risk_level === "LOW")
-  if (activeFilters.Risk === "Medium") filtered = filtered.filter(j => j.risk_level === "MEDIUM")
-  if (activeFilters.Risk === "High") filtered = filtered.filter(j => j.risk_level === "HIGH")
+  if (activeFilters.Risk === "Low") filtered = filtered.filter(j => (j.risk_level ?? "LOW") === "LOW")
+  if (activeFilters.Risk === "Medium") filtered = filtered.filter(j => (j.risk_level ?? "LOW") === "MEDIUM")
+  if (activeFilters.Risk === "High") filtered = filtered.filter(j => (j.risk_level ?? "LOW") === "HIGH")
 
   if (sortBy === "match") filtered.sort((a, b) => (b.match_score ?? 0) - (a.match_score ?? 0))
   else if (sortBy === "risk") filtered.sort((a, b) => (a.risk_score ?? 100) - (b.risk_score ?? 100))
@@ -100,8 +124,16 @@ export default function JobsPage() {
           </div>
 
           <div className="space-y-3">
-            {loaded ? (
-              filtered.length > 0 ? filtered.map((job, i) => (
+            {loading ? (
+              Array.from({ length: 6 }).map((_, i) => <JobCardSkeleton key={i} />)
+            ) : error ? (
+              <div className="text-center py-16">
+                <AlertCircle className="w-10 h-10 text-red mx-auto mb-3" />
+                <p className="text-text-secondary font-medium">Couldn&apos;t load jobs</p>
+                <p className="text-text-muted text-sm mt-1">{error}</p>
+              </div>
+            ) : filtered.length > 0 ? (
+              filtered.map((job, i) => (
                 <motion.div key={job.id}
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -109,15 +141,13 @@ export default function JobsPage() {
                 >
                   <JobCard job={job} />
                 </motion.div>
-              )) : (
-                <div className="text-center py-16">
-                  <Search className="w-10 h-10 text-text-muted mx-auto mb-3" />
-                  <p className="text-text-secondary font-medium">No jobs match your filters</p>
-                  <p className="text-text-muted text-sm mt-1">Try adjusting your search criteria</p>
-                </div>
-              )
+              ))
             ) : (
-              Array.from({ length: 6 }).map((_, i) => <JobCardSkeleton key={i} />)
+              <div className="text-center py-16">
+                <Search className="w-10 h-10 text-text-muted mx-auto mb-3" />
+                <p className="text-text-secondary font-medium">No jobs match your filters</p>
+                <p className="text-text-muted text-sm mt-1">Try adjusting your search criteria</p>
+              </div>
             )}
           </div>
         </main>

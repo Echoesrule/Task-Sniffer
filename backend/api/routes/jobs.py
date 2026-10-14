@@ -38,9 +38,18 @@ def _job_to_response(job: Job) -> JobResponse:
         canonical_url=job.canonical_url or "",
         url_status=job.url_status or "",
         skills=job.skills_list,
+        skills_required=job.skills_required_list,
+        skills_preferred=job.skills_preferred_list,
+        skills_detail=job.skills_detail_list,
         experience=job.experience_level or "",
         posted_at=job.posted_at,
         fetched_at=job.scraped_at,
+        match_score=job.match_score or 0.0,
+        match_breakdown=job.match_breakdown_dict,
+        classification=job.classification or None,
+        risk_score=job.risk_score or 0.0,
+        risk_level=job.risk_level or None,
+        status=job.status or "discovered",
     )
 
 

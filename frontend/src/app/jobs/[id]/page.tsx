@@ -4,19 +4,82 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { MatchScore } from "@/components/ui/match-score"
 import { RiskBadge } from "@/components/ui/risk-badge"
-import { mockJobs } from "@/data/mock"
+import { jobsService } from "@/services/api"
+import type { Job } from "@/types"
 import { useParams } from "next/navigation"
 import { motion } from "framer-motion"
 import {
   MapPin, Building2, Clock, Globe, DollarSign, Briefcase, ExternalLink,
-  Check, AlertTriangle, X as XIcon, ChevronLeft, BookmarkPlus, Send
+  Check, AlertTriangle, ChevronLeft, BookmarkPlus, Send, Loader2
 } from "lucide-react"
 import { timeAgo } from "@/lib/utils"
 import Link from "next/link"
+import { useState, useEffect } from "react"
+
+function toJob(r: any): Job {
+  return {
+    id: r.id,
+    title: r.title,
+    company: r.company,
+    location: r.location,
+    country: r.country,
+    remote: r.remote,
+    salary: r.salary,
+    description: r.description,
+    url: r.source_url || r.canonical_url || r.url,
+    source: r.source,
+    skills: r.skills ?? [],
+    experience: r.experience,
+    posted_at: r.posted_at ?? undefined,
+    fetched_at: r.fetched_at ?? undefined,
+    match_score: r.match_score ?? 0,
+    match_breakdown: r.match_breakdown ?? undefined,
+    risk_score: r.risk_score ?? 0,
+    risk_level: r.risk_level ?? undefined,
+    status: r.status,
+  }
+}
 
 export default function JobDetailPage() {
   const params = useParams()
-  const job = mockJobs.find(j => j.id === params.id)
+  const id = String(params.id)
+  const [job, setJob] = useState<Job | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    jobsService
+      .get(id)
+      .then(res => {
+        if (cancelled) return
+        setJob(toJob(res))
+        setError(null)
+      })
+      .catch(err => {
+        if (cancelled) return
+        setError(err?.message ?? "Failed to load job")
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [id])
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex">
+        <Sidebar />
+        <div className="flex-1 ml-[240px]">
+          <Header title="Job Detail" />
+          <div className="p-6 flex items-center justify-center gap-2 text-text-secondary">
+            <Loader2 className="w-4 h-4 animate-spin" /> Loading job...
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (!job) {
     return (
@@ -24,7 +87,13 @@ export default function JobDetailPage() {
         <Sidebar />
         <div className="flex-1 ml-[240px]">
           <Header title="Job Not Found" />
-          <div className="p-6 text-center text-text-secondary">Job not found</div>
+          <div className="p-6 text-center text-text-secondary space-y-3">
+            <p>Job not found</p>
+            {error && <p className="text-text-muted text-sm">{error}</p>}
+            <Link href="/jobs" className="inline-block text-xs text-accent hover:text-accent-hover">
+              Back to jobs
+            </Link>
+          </div>
         </div>
       </div>
     )
@@ -63,7 +132,7 @@ export default function JobDetailPage() {
                 </div>
                 <div className="flex items-center gap-4 mt-3 flex-wrap">
                   <RiskBadge level={job.risk_level ?? "LOW"} score={job.risk_score} />
-                  {job.salary && (
+                  {job.salary && job.salary !== "-" && (
                     <span className="text-sm text-text-secondary flex items-center gap-1">
                       <DollarSign className="w-3.5 h-3.5" /> {job.salary}
                     </span>
@@ -89,9 +158,9 @@ export default function JobDetailPage() {
                 className="bg-surface border border-border rounded-xl p-5">
                 <h2 className="text-sm font-semibold text-text-primary mb-3 uppercase tracking-wider">Overview</h2>
                 <div className="grid grid-cols-2 gap-3">
-                  <InfoRow icon={MapPin} label="Location" value={job.location} />
+                  <InfoRow icon={MapPin} label="Location" value={job.location || "—"} />
                   <InfoRow icon={Globe} label="Remote" value={job.remote ? `${job.remote_type ?? "full"} remote` : "On-site"} />
-                  <InfoRow icon={Briefcase} label="Experience" value={job.experience} />
+                  <InfoRow icon={Briefcase} label="Experience" value={job.experience || "—"} />
                   <InfoRow icon={Clock} label="Posted" value={job.posted_at ? timeAgo(job.posted_at) : "Unknown"} />
                   <InfoRow icon={Building2} label="Source" value={job.source} />
                   <InfoRow icon={DollarSign} label="Employment" value={job.employment_type ?? "Full-time"} />
@@ -101,48 +170,56 @@ export default function JobDetailPage() {
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}
                 className="bg-surface border border-border rounded-xl p-5">
                 <h2 className="text-sm font-semibold text-text-primary mb-3 uppercase tracking-wider">Description</h2>
-                <p className="text-sm text-text-secondary leading-relaxed">{job.description}</p>
+                <p className="text-sm text-text-secondary leading-relaxed whitespace-pre-line">
+                  {job.description || "No description available."}
+                </p>
               </motion.div>
             </div>
 
             {/* Right: Match + Risk */}
             <div className="space-y-6">
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
-                className="bg-surface border border-border rounded-xl p-5">
-                <h2 className="text-sm font-semibold text-text-primary mb-4 uppercase tracking-wider">Why This Matches</h2>
-                <div className="space-y-2.5">
-                  {breakdownEntries.map(e => (
-                    <div key={e.label} className="flex items-center justify-between">
-                      <span className="text-xs text-text-secondary">{e.label}</span>
-                      <div className="flex items-center gap-2">
-                        <div className="w-20 h-1.5 bg-surface-3 rounded-full overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700"
-                            style={{
-                              width: `${Math.round((e.value ?? 0) * 100)}%`,
-                              backgroundColor: (e.value ?? 0) >= 0.8 ? "var(--color-green)" :
-                                (e.value ?? 0) >= 0.6 ? "var(--color-amber)" : "var(--color-red)"
-                            }}
-                          />
+              {breakdownEntries.length > 0 && (
+                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
+                  className="bg-surface border border-border rounded-xl p-5">
+                  <h2 className="text-sm font-semibold text-text-primary mb-4 uppercase tracking-wider">Why This Matches</h2>
+                  <div className="space-y-2.5">
+                    {breakdownEntries.map(e => (
+                      <div key={e.label} className="flex items-center justify-between">
+                        <span className="text-xs text-text-secondary">{e.label}</span>
+                        <div className="flex items-center gap-2">
+                          <div className="w-20 h-1.5 bg-surface-3 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full transition-all duration-700"
+                              style={{
+                                width: `${Math.round((e.value ?? 0) * 100)}%`,
+                                backgroundColor: (e.value ?? 0) >= 0.8 ? "var(--color-green)" :
+                                  (e.value ?? 0) >= 0.6 ? "var(--color-amber)" : "var(--color-red)"
+                              }}
+                            />
+                          </div>
+                          <span className="text-xs font-medium text-text-primary tabular-nums w-8 text-right">
+                            {Math.round((e.value ?? 0) * 100)}%
+                          </span>
                         </div>
-                        <span className="text-xs font-medium text-text-primary tabular-nums w-8 text-right">
-                          {Math.round((e.value ?? 0) * 100)}%
-                        </span>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              </motion.div>
+                    ))}
+                  </div>
+                </motion.div>
+              )}
 
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
                 className="bg-surface border border-border rounded-xl p-5">
                 <h2 className="text-sm font-semibold text-text-primary mb-4 uppercase tracking-wider">Skills</h2>
-                <div className="flex flex-wrap gap-1.5">
-                  {job.skills.map(skill => (
-                    <span key={skill} className="text-xs px-2.5 py-1 rounded-lg bg-surface-3 text-text-secondary border border-border">
-                      {skill}
-                    </span>
-                  ))}
-                </div>
+                {job.skills.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {job.skills.map(skill => (
+                      <span key={skill} className="text-xs px-2.5 py-1 rounded-lg bg-surface-3 text-text-secondary border border-border">
+                        {skill}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-text-muted">No skills extracted</p>
+                )}
               </motion.div>
 
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}

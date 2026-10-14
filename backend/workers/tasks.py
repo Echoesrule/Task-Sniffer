@@ -15,27 +15,9 @@ def scrape_all_sources(self):
 
 
 async def _scrape_all():
-    from backend.config import get_settings
-    from backend.models.database import Database
-    from backend.services.ingestion import IngestionEngine
-    from backend.sources.registry import default_registry
+    from backend.services.runner import scrape_all_crawlable_sources
 
-    settings = get_settings()
-    db = Database(settings.database_url)
-    await db.init_db()
-    engine = IngestionEngine(db.async_session_factory)
-
-    for config in default_registry.crawlable():
-        try:
-            result = await engine.run_source(config.name)
-            logger.info(
-                "[%s] run finished new=%d dup=%d errors=%d paused=%s",
-                config.name, result.new_jobs, result.duplicates, result.errors, result.paused,
-            )
-        except Exception as e:  # noqa: BLE001 - a failing source never blocks the rest
-            logger.error("Source %s run failed: %s", config.name, e)
-
-    await db.close()
+    await scrape_all_crawlable_sources()
 
 
 @celery_app.task(bind=True, max_retries=3)

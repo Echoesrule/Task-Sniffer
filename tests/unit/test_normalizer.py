@@ -58,3 +58,24 @@ def test_normalize_skills():
     job = {"title": "Dev", "skills": ["python", "PY3", "unknownskill"]}
     result = n.normalize(job, "test")
     assert "python" in result["skills"]
+
+
+def test_normalize_extracts_skills_from_description():
+    """Regression: a job with only a description must still yield skills."""
+    n = JobNormalizer()
+    job = {
+        "title": "Backend Engineer",
+        "description": "Requirements: Strong Python and Django. Experience with Docker. AWS a plus.",
+    }
+    result = n.normalize(job, "test")
+    assert {"python", "django", "docker"} <= set(result["skills"])
+    assert "aws" in result["skills_preferred"]
+    assert "python" in result["skills_required"]
+    assert result["skills_detail"]
+
+
+def test_normalize_unions_provided_and_extracted():
+    n = JobNormalizer()
+    job = {"title": "Dev", "skills": ["golang"], "description": "We use Python daily."}
+    result = n.normalize(job, "test")
+    assert {"go", "python"} <= set(result["skills"])

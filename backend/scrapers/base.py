@@ -109,67 +109,16 @@ class JobSource(abc.ABC):
 
     @staticmethod
     def detect_skills(text: str) -> list[str]:
-        """Detect technical skills mentioned in free text."""
-        skill_patterns: list[tuple[str, re.Pattern[str]]] = [
-            ("python", re.compile(r"\bpython\b", re.I)),
-            ("javascript", re.compile(r"\bjavascript\b|\bjs\b(?!on)", re.I)),
-            ("typescript", re.compile(r"\btypescript\b|\bts\b", re.I)),
-            ("java", re.compile(r"\bjava\b(?!script)", re.I)),
-            ("react", re.compile(r"\breact(?:js)?\b", re.I)),
-            ("node.js", re.compile(r"\bnode\.?js\b", re.I)),
-            ("aws", re.compile(r"\baws\b", re.I)),
-            ("docker", re.compile(r"\bdocker\b", re.I)),
-            ("kubernetes", re.compile(r"\bkubernetes\b|\bk8s\b", re.I)),
-            ("sql", re.compile(r"\bsql\b", re.I)),
-            ("django", re.compile(r"\bdjango\b", re.I)),
-            ("fastapi", re.compile(r"\bfastapi\b", re.I)),
-            ("postgresql", re.compile(r"\bpostgres(?:ql)?\b", re.I)),
-            ("mongodb", re.compile(r"\bmongo(?:db)?\b", re.I)),
-            ("git", re.compile(r"\bgit\b(?!hub)", re.I)),
-            ("linux", re.compile(r"\blinux\b", re.I)),
-            ("c++", re.compile(r"\bc\+\+\b", re.I)),
-            ("c#", re.compile(r"\bc#\b", re.I)),
-            ("go", re.compile(r"\bgolang\b|\bgo\b", re.I)),
-            ("rust", re.compile(r"\brust\b", re.I)),
-            ("ruby", re.compile(r"\bruby\b", re.I)),
-            ("php", re.compile(r"\bphp\b", re.I)),
-            ("vue", re.compile(r"\bvue(?:js)?\b", re.I)),
-            ("angular", re.compile(r"\bangular\b", re.I)),
-            ("next.js", re.compile(r"\bnext\.?js\b", re.I)),
-            ("tailwind", re.compile(r"\btailwind\b", re.I)),
-            ("figma", re.compile(r"\bfigma\b", re.I)),
-            ("graphql", re.compile(r"\bgraphql\b", re.I)),
-            ("redis", re.compile(r"\bredis\b", re.I)),
-            ("elasticsearch", re.compile(r"\belastic(?:search)?\b", re.I)),
-            ("terraform", re.compile(r"\bterraform\b", re.I)),
-            ("gcp", re.compile(r"\bgcp\b|\bgoogle cloud\b", re.I)),
-            ("azure", re.compile(r"\bazure\b", re.I)),
-            ("jenkins", re.compile(r"\bjenkins\b", re.I)),
-            ("ci/cd", re.compile(r"\bci/?cd\b", re.I)),
-            ("machine learning", re.compile(r"\bmachine learning\b|\bml\b", re.I)),
-            ("data science", re.compile(r"\bdata scien(?:ce|tist)\b", re.I)),
-            ("pandas", re.compile(r"\bpandas\b", re.I)),
-            ("numpy", re.compile(r"\bnumpy\b", re.I)),
-            ("pytorch", re.compile(r"\bpytorch\b", re.I)),
-            ("tensorflow", re.compile(r"\btensorflow\b", re.I)),
-            ("selenium", re.compile(r"\bselenium\b", re.I)),
-            ("rest api", re.compile(r"\brest(?:ful)?\s*api\b|\bapi\b", re.I)),
-            ("agile", re.compile(r"\bagile\b|\bscrum\b", re.I)),
-            ("jira", re.compile(r"\bjira\b", re.I)),
-            ("salesforce", re.compile(r"\bsalesforce\b", re.I)),
-            ("sap", re.compile(r"\bsap\b", re.I)),
-            ("flutter", re.compile(r"\bflutter\b", re.I)),
-            ("swift", re.compile(r"\bswift\b", re.I)),
-            ("kotlin", re.compile(r"\bkotlin\b", re.I)),
-        ]
+        """Detect technical skills mentioned in free text.
 
-        found: list[str] = []
-        seen: set[str] = set()
-        for skill_name, pattern in skill_patterns:
-            if pattern.search(text) and skill_name not in seen:
-                found.append(skill_name)
-                seen.add(skill_name)
-        return found
+        Delegates to the shared deterministic extractor so every caller uses
+        the same vocabulary and boundary rules (e.g. ``C++``/``C#`` and the
+        ``go``-as-a-word guard).  Returns canonical skill ids.
+        """
+        from backend.skills import extract_matches
+
+        found = {m.canonical for m in extract_matches(text or "")}
+        return sorted(found)
 
     def filter_job(self, job: dict[str, Any]) -> bool:
         """Return True if the job passes configured include/exclude filters."""

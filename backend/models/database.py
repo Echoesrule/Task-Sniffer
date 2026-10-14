@@ -123,6 +123,10 @@ class Job(Base):
     requirements = Column(Text, default="[]")
     responsibilities = Column(Text, default="[]")
     skills = Column(Text, default="[]")
+    #: provenance + required/preferred classification from the skills pipeline
+    skills_detail = Column(Text, default="[]")
+    skills_required = Column(Text, default="[]")
+    skills_preferred = Column(Text, default="[]")
 
     location = Column(String(500), nullable=True)
     country = Column(String(10), nullable=True)
@@ -192,6 +196,39 @@ class Job(Base):
     @skills_list.setter
     def skills_list(self, value: list[str]) -> None:
         self.skills = json.dumps(value)
+
+    @property
+    def skills_detail_list(self) -> list[dict]:
+        try:
+            return json.loads(self.skills_detail) if self.skills_detail else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @skills_detail_list.setter
+    def skills_detail_list(self, value: list[dict]) -> None:
+        self.skills_detail = json.dumps(value)
+
+    @property
+    def skills_required_list(self) -> list[str]:
+        try:
+            return json.loads(self.skills_required) if self.skills_required else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @skills_required_list.setter
+    def skills_required_list(self, value: list[str]) -> None:
+        self.skills_required = json.dumps(value)
+
+    @property
+    def skills_preferred_list(self) -> list[str]:
+        try:
+            return json.loads(self.skills_preferred) if self.skills_preferred else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @skills_preferred_list.setter
+    def skills_preferred_list(self, value: list[str]) -> None:
+        self.skills_preferred = json.dumps(value)
 
     @property
     def provenances_list(self) -> list[dict]:
@@ -564,5 +601,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "url_status": "VARCHAR(20) DEFAULT 'NEEDS_REVIEW'",
         "url_validated_at": "DATETIME",
         "provenances": "TEXT DEFAULT '[]'",
+        "skills_detail": "TEXT DEFAULT '[]'",
+        "skills_required": "TEXT DEFAULT '[]'",
+        "skills_preferred": "TEXT DEFAULT '[]'",
     },
 }

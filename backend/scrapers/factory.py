@@ -104,6 +104,7 @@ class _LegacyAdapter(JobSourceAdapter):
                     location=job.get("location", ""),
                     remote=bool(job.get("remote", False)),
                     description=job.get("description", ""),
+                    skills=job.get("skills", []) or [],
                     posted_at=job.get("posted_at", ""),
                     salary_text=job.get("salary_text", ""),
                     currency=job.get("salary_currency"),

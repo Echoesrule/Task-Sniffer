@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.skills import normalize_skill_list
+
 
 EXCELLENT = "EXCELLENT"
 STRONG = "STRONG"
@@ -96,8 +98,8 @@ class JobScorer:
         if not candidate_skills:
             return 0.0
 
-        job_set = {s.lower().strip() for s in job_skills}
-        cand_set = {s.lower().strip() for s in candidate_skills}
+        job_set = {s.lower().strip() for s in normalize_skill_list(job_skills)}
+        cand_set = {s.lower().strip() for s in normalize_skill_list(candidate_skills)}
 
         if not job_set:
             return 0.5
@@ -247,7 +249,7 @@ class JobScorer:
         if not job_skills:
             return 0.5
 
-        job_set = {s.lower().strip() for s in job_skills}
+        job_set = {s.lower().strip() for s in normalize_skill_list(job_skills)}
         project_skill_hits = 0
         total_project_skills = 0
 
@@ -255,7 +257,7 @@ class JobScorer:
             proj_skills = project.get("skills", [])
             if isinstance(proj_skills, str):
                 proj_skills = [s.strip() for s in proj_skills.split(",")]
-            for ps in proj_skills:
+            for ps in normalize_skill_list(proj_skills):
                 total_project_skills += 1
                 if ps.lower().strip() in job_set:
                     project_skill_hits += 1

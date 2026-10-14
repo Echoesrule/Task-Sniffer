@@ -27,6 +27,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.matching.scoring import (
+    apply_score,
+    candidate_to_scoring_dict,
+    load_candidate,
+    score_job,
+)
 from backend.models.database import IngestionError, Job, Source
 from backend.scrapers.adapter import JobSourceAdapter, ListingItem
 from backend.services.normalizer import JobNormalizer
@@ -103,6 +109,9 @@ class IngestionEngine:
         self._normalizer = normalizer or JobNormalizer()
         self.max_jobs_per_source = max_jobs_per_source
         self.dry_run = dry_run
+        # matching candidate is resolved once per engine and cached
+        self._candidate_dict: dict[str, Any] | None = None
+        self._candidate_loaded = False
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -470,9 +479,19 @@ class IngestionEngine:
                     existing.final_url = normalized["_final_url"]
                 if application_url:
                     existing.application_url = application_url
+                # refresh derived text + skills when the new scrape extracted
+                # something; never wipe existing values with an empty result.
+                if normalized.get("description"):
+                    existing.description = normalized["description"]
+                if normalized.get("skills"):
+                    existing.skills_list = normalized["skills"]
+                    existing.skills_required_list = normalized.get("skills_required", [])
+                    existing.skills_preferred_list = normalized.get("skills_preferred", [])
+                    existing.skills_detail_list = normalized.get("skills_detail", [])
                 existing.url_status = UrlStatus.VALID.value
                 existing.url_validated_at = utcnow()
                 existing.scraped_at = datetime.now(timezone.utc)
+                await self._apply_match(session, existing)
                 out.updated += 1
                 return out
 
@@ -517,6 +536,9 @@ class IngestionEngine:
             company=normalized.get("company", item.company),
             description=normalized.get("description", ""),
             skills_list=normalized.get("skills", []),
+            skills_detail_list=normalized.get("skills_detail", []),
+            skills_required_list=normalized.get("skills_required", []),
+            skills_preferred_list=normalized.get("skills_preferred", []),
             location=normalized.get("location", item.location),
             country=source_row.country_focus,
             remote=bool(normalized.get("remote", item.remote)),
@@ -567,8 +589,26 @@ class IngestionEngine:
             out.dup += 1
             return out
         await self._merge_provenance(session, job, source_row.name, source_url)
+        await self._apply_match(session, job)
         out.new += 1
         return out
+
+    async def _candidate_for_matching(self, session: AsyncSession) -> dict[str, Any] | None:
+        """Resolve (and cache) the candidate profile used for match scoring."""
+        if not self._candidate_loaded:
+            candidate = await load_candidate(session)
+            self._candidate_dict = (
+                candidate_to_scoring_dict(candidate) if candidate is not None else None
+            )
+            self._candidate_loaded = True
+        return self._candidate_dict
+
+    async def _apply_match(self, session: AsyncSession, job: Job) -> None:
+        """Score ``job`` against the stored candidate, if one exists."""
+        candidate = await self._candidate_for_matching(session)
+        if candidate is None:
+            return
+        apply_score(job, score_job(job, candidate))
 
     async def _merge_provenance(self, session: AsyncSession, job: Job, source_name: str, url: str) -> None:
         sources = job.provenances_list

@@ -324,3 +324,74 @@ def test_run_source_reports_unconfigured_source(tmp_path):
     assert any("no adapter" in m for m in result.error_messages)
     assert jobs == []
     assert errors and errors[0].stage == "adapter"
+
+
+def test_run_source_persists_extracted_skills(tmp_path):
+    """Regression: skills + classification are extracted and persisted."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t8.db'}")
+    _run(db.init_db())
+
+    async def scenario():
+        adapter = make_fake_adapter(
+            "fakesrc", [("/jobs/backend-engineer-1", "Backend Engineer", "Acme Kenya Ltd")]
+        )
+
+        async def parse_detail(html, url):
+            return {
+                "description": (
+                    "Requirements: Strong Python and Django. Experience with Docker. "
+                    "AWS a plus."
+                )
+            }
+
+        adapter.parse_detail = parse_detail  # type: ignore[method-assign]
+
+        engine = IngestionEngine(
+            db.async_session_factory,
+            registry=SourceRegistry(),
+            adapter_factory=lambda cfg: adapter,
+            max_jobs_per_source=5,
+        )
+        engine._registry.register(_approved("fakesrc"))
+        result = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            jobs = (await session.execute(select(Job))).scalars().all()
+        return result, jobs
+
+    result, jobs = _run(scenario())
+    _run(db.close())
+
+    assert result.new_jobs == 1
+    job = jobs[0]
+    assert {"python", "django", "docker"} <= set(job.skills_list)
+    assert "aws" in job.skills_preferred_list
+    assert "python" in job.skills_required_list
+    assert job.skills_detail_list
+
+
+def test_run_source_scores_jobs_when_candidate_exists(tmp_path):
+    """New jobs are scored against the stored candidate at ingestion time."""
+    from backend.matching.scoring import ensure_default_candidate
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t9.db'}")
+    _run(db.init_db())
+
+    async def scenario():
+        async with db.async_session_factory() as session:
+            await ensure_default_candidate(session)
+            await session.commit()
+
+        engine = _engine_with(db)
+        engine._registry.register(_approved("fakesrc"))
+        result = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            jobs = (await session.execute(select(Job))).scalars().all()
+        return result, jobs
+
+    result, jobs = _run(scenario())
+    _run(db.close())
+
+    assert result.new_jobs == 3
+    assert all(j.match_score > 0.0 for j in jobs)
+    assert all(j.match_breakdown_dict for j in jobs)
+    assert all(j.classification for j in jobs)
