@@ -25,7 +25,8 @@ from sqlalchemy import select
 
 from backend.api import deps as api_deps
 from backend.api.routes import sources as sources_routes
-from backend.models.database import Database, Job
+from backend.models.database import Database, Job, User
+from backend.security import create_access_token, hash_password
 from backend.scrapers.adapter import JobSourceAdapter, ListingItem
 from backend.services.ingestion import IngestionEngine
 from backend.sources.models import (
@@ -515,6 +516,20 @@ def test_source_mutating_endpoints_require_auth(tmp_path):
 
     db = Database(f"sqlite+aiosqlite:///{tmp_path/'api.db'}")
     _run(db.init_db())
+
+    async def seed():
+        async with db.async_session_factory() as session:
+            user = User(
+                email="admin@example.com",
+                hashed_password=hash_password("adminpass123"),
+                is_active=True,
+            )
+            session.add(user)
+            await session.commit()
+
+    _run(seed())
+    valid_token = create_access_token({"sub": "admin@example.com"})
+
     original = api_deps._db
     api_deps.set_db(db)
 
@@ -524,7 +539,7 @@ def test_source_mutating_endpoints_require_auth(tmp_path):
             no_auth = await client.post("/sources/fakesrc/pause")
             with_auth = await client.post(
                 "/sources/fakesrc/pause",
-                headers={"Authorization": "Bearer test-token"},
+                headers={"Authorization": f"Bearer {valid_token}"},
             )
             read = await client.get("/sources")
         return no_auth, with_auth, read

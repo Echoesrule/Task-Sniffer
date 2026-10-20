@@ -17,7 +17,8 @@ from backend.api import deps as api_deps
 from backend.api.routes import candidates as candidates_routes
 from backend.api.routes import sources as sources_routes
 from backend.config import Settings
-from backend.models.database import Database
+from backend.models.database import Database, User
+from backend.security import create_access_token, hash_password
 
 
 def _run(coro):
@@ -35,11 +36,24 @@ def _with_app(router, tmp_path, prefix=""):
     app.include_router(router, prefix=prefix)
     db = Database(f"sqlite+aiosqlite:///{tmp_path/'api.db'}")
     _run(db.init_db())
-    return app, db
+
+    async def seed():
+        async with db.async_session_factory() as session:
+            user = User(
+                email="testuser@example.com",
+                hashed_password=hash_password("password123"),
+                is_active=True,
+            )
+            session.add(user)
+            await session.commit()
+
+    _run(seed())
+    token = create_access_token({"sub": "testuser@example.com"})
+    return app, db, token
 
 
 def test_cv_upload_sanitizes_filename_and_stays_in_storage(tmp_path, monkeypatch):
-    app, db = _with_app(candidates_routes.router, tmp_path)
+    app, db, token = _with_app(candidates_routes.router, tmp_path)
     storage = tmp_path / "cvs"
     monkeypatch.setattr(
         candidates_routes,
@@ -53,7 +67,7 @@ def test_cv_upload_sanitizes_filename_and_stays_in_storage(tmp_path, monkeypatch
         async with _client(app) as client:
             return await client.post(
                 "/cv",
-                headers={"Authorization": "Bearer test-token"},
+                headers={"Authorization": f"Bearer {token}"},
                 files={"file": ("../../evil.pdf", b"%PDF-1.4 payload", "application/pdf")},
             )
 
@@ -76,7 +90,7 @@ def test_cv_upload_sanitizes_filename_and_stays_in_storage(tmp_path, monkeypatch
 
 
 def test_cv_upload_rejects_bad_extension(tmp_path, monkeypatch):
-    app, db = _with_app(candidates_routes.router, tmp_path)
+    app, db, token = _with_app(candidates_routes.router, tmp_path)
     monkeypatch.setattr(
         candidates_routes,
         "get_settings",
@@ -89,7 +103,7 @@ def test_cv_upload_rejects_bad_extension(tmp_path, monkeypatch):
         async with _client(app) as client:
             return await client.post(
                 "/cv",
-                headers={"Authorization": "Bearer test-token"},
+                headers={"Authorization": f"Bearer {token}"},
                 files={"file": ("payload.sh", b"#!/bin/sh", "application/pdf")},
             )
 
@@ -103,7 +117,7 @@ def test_cv_upload_rejects_bad_extension(tmp_path, monkeypatch):
 
 
 def test_cv_upload_rejects_oversized_file(tmp_path, monkeypatch):
-    app, db = _with_app(candidates_routes.router, tmp_path)
+    app, db, token = _with_app(candidates_routes.router, tmp_path)
     monkeypatch.setattr(
         candidates_routes,
         "get_settings",
@@ -117,7 +131,7 @@ def test_cv_upload_rejects_oversized_file(tmp_path, monkeypatch):
         async with _client(app) as client:
             return await client.post(
                 "/cv",
-                headers={"Authorization": "Bearer test-token"},
+                headers={"Authorization": f"Bearer {token}"},
                 files={"file": ("cv.pdf", b"x" * 64, "application/pdf")},
             )
 
@@ -131,7 +145,7 @@ def test_cv_upload_rejects_oversized_file(tmp_path, monkeypatch):
 
 
 def test_source_mutation_requires_token(tmp_path):
-    app, db = _with_app(sources_routes.router, tmp_path, prefix="/sources")
+    app, db, token = _with_app(sources_routes.router, tmp_path, prefix="/sources")
     original = api_deps._db
     api_deps.set_db(db)
 

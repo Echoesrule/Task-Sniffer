@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func as sa_func
 
 from backend.api.deps import set_db
-from backend.api.routes import applications, analytics, candidates, jobs, sources
+from backend.api.routes import applications, analytics, auth, candidates, jobs, sources
 from backend.config import get_settings
 from backend.models.database import Database, Source
 
@@ -132,6 +132,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
     app.include_router(sources.router, prefix="/sources", tags=["sources"])
     app.include_router(candidates.router, prefix="/candidate", tags=["candidates"])
