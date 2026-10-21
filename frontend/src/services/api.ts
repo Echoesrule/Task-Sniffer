@@ -1,11 +1,37 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
+function getAuthToken(): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    return localStorage.getItem("auth_token") || localStorage.getItem("access_token") || null
+  } catch {
+    return null
+  }
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  const token = getAuthToken()
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const mergedHeaders = { ...headers, ...(options?.headers as Record<string, string> | undefined) }
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", Authorization: "Bearer test-token", ...options?.headers },
     ...options,
+    headers: mergedHeaders,
   })
-  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      const err = new Error(`Unauthorized: ${res.status}`)
+      ;(err as any).status = res.status
+      throw err
+    }
+    const err = new Error(`API error: ${res.status}`)
+    ;(err as any).status = res.status
+    throw err
+  }
   return res.json()
 }
 
