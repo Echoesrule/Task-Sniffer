@@ -57,6 +57,9 @@ class _LegacyAdapter(JobSourceAdapter):
     def __init__(self, config: SourceConfig, legacy_class: str) -> None:
         super().__init__(config)
         self._legacy_class = legacy_class
+        #: per-board results from the most recent fetch (empty for non-ATS
+        #: legacy sources). Lets a zero-job run be diagnosed per board.
+        self.last_board_stats: list[dict[str, Any]] = []
         # Apply the explicit, evidence-based policy for this legacy source.
         # An absent/empty policy leaves the class defaults ([]), which the
         # engine treats as fail-closed rather than "allow any domain".
@@ -90,11 +93,16 @@ class _LegacyAdapter(JobSourceAdapter):
         return classes[self._legacy_class](kwargs)
 
     async def fetch_listings(self, *, limit: int | None = None, limiter=None) -> list[ListingItem]:
+        self.last_board_stats = []
         try:
             raw_jobs = await self._legacy.fetch_jobs() or []
         except Exception as exc:  # noqa: BLE001
             logger.warning("[%s] legacy fetch_jobs failed: %s", self.name, exc)
             return []
+        stats = getattr(self._legacy, "board_stats", None)
+        if stats:
+            self.last_board_stats = list(stats)
+            logger.info("[%s] board results: %s", self.name, self.last_board_stats)
         items: list[ListingItem] = []
         for job in raw_jobs:
             items.append(

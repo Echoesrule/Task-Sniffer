@@ -93,3 +93,44 @@ def test_legacy_adapter_fails_closed_when_no_policy(monkeypatch):
 def test_unconfigured_source_raises_typed_error():
     with pytest.raises(UnconfiguredSourceError):
         build_adapter(_config("careerpointkenya"))
+
+
+def _close_any(adapter) -> None:
+    async def _do() -> None:
+        try:
+            await adapter.close()
+        finally:
+            legacy_client = getattr(getattr(adapter, "_legacy", None), "_client", None)
+            if legacy_client is not None:
+                await legacy_client.aclose()
+
+    asyncio.run(_do())
+
+
+def test_every_crawlable_source_can_build_or_has_policy():
+    """Phase 2: no active crawlable source may be left unconfigured."""
+    from backend.sources.registry import default_registry
+
+    unconfigured = set(policy.unconfigured_sources())
+    for config in default_registry.crawlable():
+        assert config.name not in unconfigured, (
+            f"crawlable source {config.name!r} has no adapter or URL/domain policy"
+        )
+        try:
+            adapter = build_adapter(config)
+        except UnconfiguredSourceError as exc:  # pragma: no cover - failure path
+            pytest.fail(f"crawlable source {config.name!r} cannot build an adapter: {exc}")
+        else:
+            _close_any(adapter)
+
+
+def test_careerpointkenya_disabled_pending_adapter():
+    """Phase 2A: audit-approved but adapter-less source is not crawlable."""
+    from backend.sources.registry import default_registry
+
+    cfg = default_registry.get("careerpointkenya")
+    assert cfg is not None
+    assert not cfg.crawlable
+    assert "careerpointkenya" in policy.unconfigured_sources()
+    reason = default_registry.refuse_reason("careerpointkenya")
+    assert reason and "REVIEW" in reason

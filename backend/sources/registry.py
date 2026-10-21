@@ -22,6 +22,18 @@ from backend.sources.models import (
 )
 
 
+#: Employer board identifiers per ATS source. Each entry is a *board slug* that
+#: has been verified against the provider's public API (or a recorded fixture),
+#: never guessed from an employer name. Empty by default: a source with no
+#: verified boards yields zero jobs and logs a clear warning rather than
+#: failing, so "zero jobs" stays diagnosable. The adapter factory passes these
+#: to the legacy Greenhouse/Ashby scrapers as their ``boards`` configuration.
+ATS_BOARD_CONFIG: dict[str, list[str]] = {
+    "greenhouse": [],
+    "ashby": [],
+}
+
+
 def _audited(
     name: str,
     access_method: AccessMethod,
@@ -29,6 +41,7 @@ def _audited(
     *,
     url: str = "",
     feed_url: str = "",
+    extra_urls: list[str] | None = None,
     robots: RobotsStatus = RobotsStatus.ALLOWED,
     terms: TermsStatus = TermsStatus.REVIEWED,
     provenance: ProvenanceClass = ProvenanceClass.JOB_BOARD,
@@ -44,6 +57,7 @@ def _audited(
         name=name,
         url=url,
         feed_url=feed_url,
+        extra_urls=list(extra_urls or []),
         access_method=access_method,
         permission_status=permission,
         robots_status=robots,
@@ -102,15 +116,25 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
         rate_limit=5.0,
         schedule_minutes=60,
     ),
+    # Audit cleared robots/sitemap for HTML, but no adapter or URL/domain policy
+    # was ever implemented, so crawling it only produced a repeated
+    # "adapter unavailable" error. Keep it off (REVIEW) until an adapter exists
+    # and the source is re-audited - do not re-enable without one.
     "careerpointkenya": _audited(
         "careerpointkenya",
         AccessMethod.HTML,
-        PermissionStatus.APPROVED,
+        PermissionStatus.REVIEW,
         url="https://www.careerpointkenya.co.ke",
         robots=RobotsStatus.ALLOWED,
         provenance=ProvenanceClass.JOB_BOARD,
         rate_limit=5.0,
         schedule_minutes=60,
+        active=False,
+        notes=(
+            "robots/sitemap approved but no adapter or URL policy implemented; "
+            "disabled to stop repeated ingestion errors. Implement an adapter "
+            "and re-audit before enabling."
+        ),
     ),
     # --- Official (very high provenance; applying is auth-gated) --------
     "kra": _audited(
@@ -162,22 +186,24 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
         AccessMethod.API,
         PermissionStatus.APPROVED,
         url="https://boards-api.greenhouse.io",
+        extra_urls=ATS_BOARD_CONFIG["greenhouse"],
         country="GLOBAL",
         tier=2,
         rate_limit=1.5,
         schedule_minutes=180,
-        notes="official public boards API",
+        notes="official public boards API; board slugs configured in ATS_BOARD_CONFIG",
     ),
     "ashby": _audited(
         "ashby",
         AccessMethod.API,
         PermissionStatus.APPROVED,
         url="https://api.ashbyhq.com",
+        extra_urls=ATS_BOARD_CONFIG["ashby"],
         country="GLOBAL",
         tier=2,
         rate_limit=1.5,
         schedule_minutes=180,
-        notes="official public posting API",
+        notes="official public posting API; board slugs configured in ATS_BOARD_CONFIG",
     ),
     # --- REVIEW (do not enable until re-audited) -------------------------
     "brightermonday": _audited(

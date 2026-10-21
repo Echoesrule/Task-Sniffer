@@ -44,17 +44,24 @@ class GreenhouseScraper(JobSource):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
         self._boards: list[str] = self.config.get("boards", [])
+        #: per-board outcome of the last ``fetch_jobs`` call, so "zero jobs" is
+        #: diagnosable (which board was tried, whether it responded, how many
+        #: postings it returned).
+        self.board_stats: list[dict[str, Any]] = []
 
     def _detail_url(self, board: str, job_id: str) -> str:
         return f"{JOB_BOARDS_BASE}/{board}/jobs/{job_id}"
 
-    async def _fetch_board(self, board: str) -> list[dict[str, Any]]:
+    async def _fetch_board(self, board: str) -> list[dict[str, Any]] | None:
+        """Fetch one board. Returns None when the API gave no usable response
+        (invalid board identifier / API error) as distinct from a valid 200 with
+        zero postings (returns ``[]``)."""
         url = f"{self.BOARDS_BASE}/{board}/jobs"
         data = await self.fetch(url)
         if data is None:
-            return []
+            return None
 
-        raw_jobs = data.get("jobs", [])
+        raw_jobs = data.get("jobs", []) if isinstance(data, dict) else []
         result: list[dict[str, Any]] = []
 
         for item in raw_jobs:
@@ -102,10 +109,35 @@ class GreenhouseScraper(JobSource):
 
     async def fetch_jobs(self) -> list[dict[str, Any]]:
         all_jobs: list[dict[str, Any]] = []
+        self.board_stats = []
 
         boards = self._boards or self.config.get("boards", [])
+        if not boards:
+            logger.warning(
+                "[greenhouse] no boards configured; set verified board slugs to "
+                "fetch postings (see ATS_BOARD_CONFIG)"
+            )
+            return []
+
         for board in boards:
-            board_jobs = await self._fetch_board(board)
+            try:
+                board_jobs = await self._fetch_board(board)
+            except Exception as exc:  # noqa: BLE001 - one board never blocks the rest
+                logger.warning("[greenhouse] board %s failed: %s", board, exc)
+                self.board_stats.append(
+                    {"board": board, "ok": False, "jobs": 0, "error": str(exc)}
+                )
+                continue
+            if board_jobs is None:
+                logger.warning(
+                    "[greenhouse] board %s: no API response (invalid board id or "
+                    "API error)", board,
+                )
+                self.board_stats.append(
+                    {"board": board, "ok": False, "jobs": 0, "error": "no response"}
+                )
+                continue
+            self.board_stats.append({"board": board, "ok": True, "jobs": len(board_jobs)})
             all_jobs.extend(board_jobs)
 
         filtered = [j for j in all_jobs if self.filter_job(j)]

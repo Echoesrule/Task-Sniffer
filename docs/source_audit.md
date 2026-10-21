@@ -49,3 +49,10 @@ Verdict values: `permission_status` in {APPROVED, API, REVIEW, RESTRICTED, DISAB
 ## First implementation group (spec §4)
 
 `Fuzu`, `MyJobMag`, `Corporate Staffing`, `KRA` — these four cover approved HTML and RSS access methods and produce the correct URLs the Milestone 2 pipeline must prove out before adding more.
+
+---
+
+## Implementation status (Phase 2, registry/factory reconciliation)
+
+- **Career Point Kenya** — audit approved `html`, but no adapter or URL/domain policy was implemented. It is now `REVIEW` + inactive (`source_status=DISABLED`) so the scheduler no longer emits a repeated "adapter unavailable" error. Re-enable only after an adapter is implemented and the source is re-audited.
+- **Greenhouse / Ashby** — board slugs are configured in `backend/sources/registry.py::ATS_BOARD_CONFIG` and passed to the adapters as `SourceConfig.extra_urls`. The list is **empty by default**: a board must be verified against the provider's public API (or a recorded fixture) before it is added, never guessed from an employer name. Zero configured boards now produce a diagnostic warning and per-board outcome stats rather than silent zero results.
