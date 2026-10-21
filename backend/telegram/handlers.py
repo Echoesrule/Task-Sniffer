@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, func as sa_func
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from backend.config import get_settings
@@ -64,6 +64,18 @@ async def _get_linked_candidate(user: TelegramUser, session):
     return result.scalars().first()
 
 
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("🔎 Find Jobs", callback_data="menu:find")],
+        [InlineKeyboardButton("👤 My Profile", callback_data="menu:profile")],
+        [InlineKeyboardButton("⚙️ Job Preferences", callback_data="menu:prefs")],
+        [InlineKeyboardButton("📋 My Applications", callback_data="menu:apps")],
+        [InlineKeyboardButton("🔔 Job Alerts", callback_data="menu:alerts")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="menu:help")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     db = get_db()
@@ -78,8 +90,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             existing.is_active = True
             await session.commit()
             await update.message.reply_text(
-                "Welcome back! You're already registered for job alerts.\n"
-                "Use /settings to configure your preferences."
+                "Welcome back to Task Sniffer!\n\nUse the menu below to navigate.",
+                reply_markup=_main_menu_keyboard(),
             )
         else:
             new_user = TelegramUser(
@@ -92,18 +104,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(
                 "Welcome to Task Sniffer!\n\n"
                 "You'll receive alerts for jobs matching your criteria.\n\n"
-                "Commands:\n"
-                "/top - Latest high-match jobs\n"
-                "/search <query> - Search jobs\n"
-                "/link <email> <password> - Link your web account\n"
-                "/unlink - Unlink your web account\n"
-                "/apply <job_id> - Track application\n"
-                "/my_applications - View tracked apps\n"
-                "/update_status <app_id> <status> - Update status\n"
-                "/settings - Configure preferences\n"
-                "/stats - View statistics\n"
-                "/sources - List active sources\n"
-                "/stop - Stop notifications"
+                "Use the menu below to navigate.",
+                reply_markup=_main_menu_keyboard(),
             )
 
 
@@ -607,3 +609,72 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await session.commit()
 
         await update.message.reply_text(f"Application status updated: {old_status} -> {new_status}")
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    db = get_db()
+
+    if data == "menu:main":
+        await query.edit_message_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
+        return
+    if data == "menu:find":
+        await query.edit_message_text(
+            "Find Jobs\n\nUse /top for top matches or /search <query> to search.\n\nYou can also track jobs with /apply <job_id>.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:profile":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            linked = "No" if not tg_user or not tg_user.candidate_id else "Yes"
+            text = f"My Profile\n\nLinked to web account: {linked}\nUse /link <email> <password> to link or /unlink to unlink.\nUse /settings to view alert preferences."
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "menu:prefs":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+            return
+        await query.edit_message_text(
+            "Job Preferences\n\nUse /settings to view current preferences.\nUse /set_keywords <k1,k2> to set keywords.\nUse /set_exclude <k1,k2> to set exclusions.\nUse /set_salary <amount> to set min salary.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:apps":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+            return
+        await query.edit_message_text(
+            "My Applications\n\nUse /my_applications to view tracked applications.\nUse /apply <job_id> to track a job.\nUse /update_status <app_id> <status> to update status.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:alerts":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            status = "Active" if tg_user and tg_user.is_active else "Inactive"
+            text = f"Job Alerts\n\nStatus: {status}\nUse /start to re-enable or /stop to pause alerts."
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "menu:help":
+        await query.edit_message_text(
+            "Task Sniffer Help\n\nCommands:\n/start - Main menu\n/top - Top jobs\n/search <q> - Search\n/link <email> <pass> - Link account\n/apply <job_id> - Track job\n/my_applications - View apps\n/settings - Preferences",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")]]),
+        )
+        return
+
+    await query.edit_message_text("Menu", reply_markup=_main_menu_keyboard())

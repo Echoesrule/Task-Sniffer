@@ -4,6 +4,7 @@ import logging
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -26,6 +27,7 @@ from backend.telegram.handlers import (
     top_jobs,
     link_account,
     unlink_account,
+    menu_callback,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ def create_bot_app() -> Application:
     application.add_handler(CommandHandler("my_applications", my_applications))
     application.add_handler(CommandHandler("update_status", update_status))
     application.add_handler(CommandHandler("top", top_jobs))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
 
     logger.info("Telegram bot created successfully")
     return application
