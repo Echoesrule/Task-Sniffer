@@ -24,15 +24,19 @@ export default function JobsPage() {
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({})
   const [sortBy, setSortBy] = useState("match")
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const pageSize = 20
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     jobsService
-      .list({ page_size: "100" })
+      .list({ page: String(page), page_size: String(pageSize) })
       .then(res => {
         if (cancelled) return
         setJobs(res.jobs as Job[])
+        setTotal(res.total ?? 0)
         setError(null)
       })
       .catch(err => {
@@ -43,7 +47,7 @@ export default function JobsPage() {
         if (!cancelled) setLoading(false)
       })
     return () => { cancelled = true }
-  }, [])
+  }, [page])
 
   const sourceOptions = ["All", ...Array.from(new Set(jobs.map(j => j.source).filter(Boolean))).sort()]
   const filters = baseFilters.map(f => (f.label === "Source" ? { ...f, options: sourceOptions } : f))
@@ -133,15 +137,38 @@ export default function JobsPage() {
                 <p className="text-text-muted text-sm mt-1">{error}</p>
               </div>
             ) : filtered.length > 0 ? (
-              filtered.map((job, i) => (
-                <motion.div key={job.id}
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.2, delay: i * 0.03 }}
-                >
-                  <JobCard job={job} />
-                </motion.div>
-              ))
+              <>
+                {filtered.map((job, i) => (
+                  <motion.div key={job.id}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.2, delay: i * 0.03 }}
+                  >
+                    <JobCard job={job} />
+                  </motion.div>
+                ))}
+                <div className="flex items-center justify-between pt-4">
+                  <span className="text-xs text-text-muted">
+                    Page {page} {total > 0 && `of ${Math.max(1, Math.ceil(total / pageSize))}`} ({total} total)
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      disabled={page <= 1 || loading}
+                      className="px-3 py-1.5 text-xs bg-surface border border-border rounded-lg text-text-secondary disabled:opacity-50 disabled:cursor-not-allowed hover:text-text-primary"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => setPage(p => p + 1)}
+                      disabled={loading || page >= Math.ceil(total / pageSize)}
+                      className="px-3 py-1.5 text-xs bg-surface border border-border rounded-lg text-text-secondary disabled:opacity-50 disabled:cursor-not-allowed hover:text-text-primary"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </>
             ) : (
               <div className="text-center py-16">
                 <Search className="w-10 h-10 text-text-muted mx-auto mb-3" />
