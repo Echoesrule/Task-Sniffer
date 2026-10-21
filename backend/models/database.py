@@ -510,6 +510,47 @@ class TelegramUser(Base):
         return f"<TelegramUser {self.chat_id} ({self.username})>"
 
 
+class TelegramAlert(Base):
+    """Durable per-user/per-job alert delivery record (Phase 3).
+
+    The unique ``(telegram_user_id, job_id)`` constraint makes alert delivery
+    idempotent: a job is sent to a given user at most once, no matter how many
+    times the scheduler/alert loop runs or how many workers race.
+    """
+
+    __tablename__ = "telegram_alerts"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    telegram_user_id = Column(
+        String(36),
+        ForeignKey("telegram_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    job_id = Column(
+        String(36),
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    #: PENDING (claimed, send in flight) / SENT / FAILED
+    status = Column(String(20), default="PENDING", nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    last_error = Column(String(500), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_user_id", "job_id", name="uq_telegram_alert_user_job"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TelegramAlert user={self.telegram_user_id} job={self.job_id} {self.status}>"
+
+
 class Database:
     """Async database session management."""
 
