@@ -18,17 +18,54 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
     headers["Authorization"] = `Bearer ${token}`
   }
   const mergedHeaders = { ...headers, ...(options?.headers as Record<string, string> | undefined) }
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: mergedHeaders,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: mergedHeaders,
+    })
+  } catch (e: any) {
+    const err = new Error("Network error")
+    ;(err as any).status = 0
+    throw err
+  }
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
-      const err = new Error(`Unauthorized: ${res.status}`)
+    let detail: string | undefined
+    try {
+      const ct = res.headers.get("content-type") || ""
+      if (ct.includes("application/json")) {
+        const data = await res.json()
+        detail = data?.detail || data?.message || data?.error
+      }
+    } catch {
+      // ignore
+    }
+    if (res.status === 401) {
+      const err = new Error(detail || "Unauthorized")
+      ;(err as any).status = 401
+      throw err
+    }
+    if (res.status === 403) {
+      const err = new Error(detail || "Forbidden")
+      ;(err as any).status = 403
+      throw err
+    }
+    if (res.status === 404) {
+      const err = new Error(detail || "Not found")
+      ;(err as any).status = 404
+      throw err
+    }
+    if (res.status === 429) {
+      const err = new Error(detail || "Rate limited")
+      ;(err as any).status = 429
+      throw err
+    }
+    if (res.status >= 500) {
+      const err = new Error(detail || "Server error")
       ;(err as any).status = res.status
       throw err
     }
-    const err = new Error(`API error: ${res.status}`)
+    const err = new Error(detail || `Request failed (${res.status})`)
     ;(err as any).status = res.status
     throw err
   }
