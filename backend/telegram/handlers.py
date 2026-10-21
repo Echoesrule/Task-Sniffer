@@ -69,16 +69,28 @@ async def _get_linked_candidate(user: TelegramUser, session):
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
-        [InlineKeyboardButton("🔎 Find Jobs", callback_data="menu:find")],
-        [InlineKeyboardButton("👤 My Job Profile", callback_data="menu:profile")],
-        [InlineKeyboardButton("⚙️ Job Preferences", callback_data="menu:prefs")],
-        [InlineKeyboardButton("⭐ Saved Jobs (N/A)", callback_data="menu:na:saved")],
-        [InlineKeyboardButton("📋 My Applications", callback_data="menu:apps")],
-        [InlineKeyboardButton("🔔 Job Alerts", callback_data="menu:alerts")],
+        [InlineKeyboardButton("🎯 Top Matches", callback_data="jobs:rec:1")],
+        [InlineKeyboardButton("🔎 Search Jobs", callback_data="menu:search")],
+        [InlineKeyboardButton("📋 All Jobs", callback_data="jobs:all:1")],
+        [InlineKeyboardButton("🗂 My Applications", callback_data="menu:apps")],
+        [InlineKeyboardButton("👤 My Profile", callback_data="menu:profile")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
-        [InlineKeyboardButton("❓ Help", callback_data="menu:help")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+async def _has_completed_profile(tg_user: TelegramUser, session) -> bool:
+    if not tg_user:
+        return False
+    if tg_user.candidate_id:
+        cand_res = await session.execute(select(Candidate).where(Candidate.id == tg_user.candidate_id))
+        candidate = cand_res.scalars().first()
+        if candidate:
+            if candidate.preferred_roles_list or candidate.skills_list or candidate.preferred_locations_list:
+                return True
+    if tg_user.keywords_list:
+        return True
+    return False
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -94,10 +106,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if existing:
             existing.is_active = True
             await session.commit()
-            await update.message.reply_text(
-                "Welcome back to Task Sniffer!\n\nUse the menu below to navigate.",
-                reply_markup=_main_menu_keyboard(),
-            )
+            if await _has_completed_profile(existing, session):
+                await update.message.reply_text(
+                    "Welcome back to Task Sniffer!\n\nYour dashboard is ready.",
+                    reply_markup=_main_menu_keyboard(),
+                )
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("Set Up My Profile", callback_data="profile:start")],
+                    [InlineKeyboardButton("Link Existing Account", callback_data="menu:link")],
+                    [InlineKeyboardButton("Open Dashboard", callback_data="menu:main")],
+                ]
+                await update.message.reply_text(
+                    "Complete your profile to get better matches, or link an existing account.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
         else:
             new_user = TelegramUser(
                 chat_id=chat_id,
@@ -106,11 +129,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             session.add(new_user)
             await session.commit()
+            keyboard = [
+                [InlineKeyboardButton("Set Up My Profile", callback_data="profile:start")],
+                [InlineKeyboardButton("Link Existing Account", callback_data="menu:link")],
+            ]
             await update.message.reply_text(
-                "Welcome to Task Sniffer!\n\n"
-                "You'll receive alerts for jobs matching your criteria.\n\n"
-                "Use the menu below to navigate.",
-                reply_markup=_main_menu_keyboard(),
+                "Welcome to Task Sniffer!\n\nLet's set up your profile to find relevant jobs.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
 
@@ -756,7 +781,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         user = await _ensure_user(update)
         if not user:
             try:
-                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
             except Exception:
                 pass
             return
@@ -768,9 +793,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             result = await session.execute(q.offset((page-1)*5).limit(5))
             jobs = result.scalars().all()
             if not jobs:
-                text = "Recommended Jobs\n\nNothing to show right now."
+                text = "Top Matches\n\nNothing strong right now."
             else:
-                lines = [f"Recommended Jobs (page {page}):\n"]
+                lines = [f"Top Matches (page {page}):\n"]
                 for i, job in enumerate(jobs, 1+(page-1)*5):
                     remote = " [Remote]" if job.remote else ""
                     url_status = job.url_status or "NEEDS_REVIEW"
@@ -786,7 +811,43 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"jobs:rec:{page+1}"))
         if nav:
             keyboard.append(nav)
-        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:find"), InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+        try:
+            await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data.startswith("jobs:all:"):
+        try:
+            page = int(data.split(":")[-1])
+        except Exception:
+            page = 1
+        page = max(1, page)
+        async with db.async_session_factory() as session:
+            q = select(Job).order_by(Job.created_at.desc())
+            result = await session.execute(q.offset((page-1)*5).limit(5))
+            jobs = result.scalars().all()
+            if not jobs:
+                text = "All Jobs\n\nNo jobs found."
+            else:
+                lines = [f"All Jobs (page {page}):\n"]
+                for i, job in enumerate(jobs, 1+(page-1)*5):
+                    remote = " [Remote]" if job.remote else ""
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   ID: {job.id[:8]}")
+                text = "\n\n".join(lines)
+        keyboard = []
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"jobs:all:{page-1}"))
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"jobs:all:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
         try:
             await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
@@ -834,34 +895,65 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 pass
         return
     if data == "menu:search":
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
         await query.edit_message_text(
-            "Search Jobs\n\nType your search query (e.g., python react) and I'll find matching jobs.\n\nSend your query now or tap Back.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+            "Search Jobs\n\nType your search query now.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]),
         )
         context.user_data["awaiting_search"] = True
+        return
+    if data == "profile:start":
+        try:
+            await query.edit_message_text("Starting profile setup...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]))
+        except Exception:
+            pass
+        context.user_data["profile_step"] = "titles"
+        context.user_data["profile_new"] = True
+        try:
+            await query.message.reply_text("Let's build your profile.\n\nStep 1/4: Preferred job titles (comma separated). Or type /skip to skip.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]))
+        except Exception:
+            pass
         return
     if data == "menu:profile":
         user = await _ensure_user(update)
         if not user:
             try:
-                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
             except Exception:
-                await query.message.reply_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+                pass
             return
         async with db.async_session_factory() as session:
             tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
             tg_user = tg_res.scalars().first()
-            linked = "Yes" if tg_user and tg_user.candidate_id else "No"
-            text = f"My Job Profile\n\nLinked to web account: {linked}\n\nUse 'Edit Profile' to set job titles, skills, location."
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if candidate:
+                roles = ", ".join(candidate.preferred_roles_list) if candidate.preferred_roles_list else "(none)"
+                skills = ", ".join(candidate.skills_list) if candidate.skills_list else "(none)"
+                locs = ", ".join(candidate.preferred_locations_list) if candidate.preferred_locations_list else "(none)"
+                text = f"My Profile\n\nLinked: Yes\n\nRoles: {roles}\nSkills: {skills}\nLocations: {locs}"
+            elif tg_user:
+                roles = ", ".join(tg_user.keywords_list) if tg_user.keywords_list else "(none)"
+                text = f"My Profile (Telegram)\n\nKeywords: {roles}\n\nLink account and set up full profile for better matching."
+            else:
+                text = "My Profile\n\nNo profile set."
         keyboard = [
-            [InlineKeyboardButton("✏️ Edit Profile", callback_data="profile:start")],
-            [InlineKeyboardButton("🔗 Link Account", callback_data="menu:link")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            [InlineKeyboardButton("Edit Profile", callback_data="profile:start")],
+            [InlineKeyboardButton("Link Account", callback_data="menu:link")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
         ]
         try:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            try:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
         return
     if data == "menu:link":
         await query.edit_message_text(
@@ -882,12 +974,36 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data == "menu:apps":
         user = await _ensure_user(update)
         if not user:
-            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
             return
-        await query.edit_message_text(
-            "My Applications\n\nUse /my_applications to view.\nUse /apply <job_id> to track.\nUse /update_status <app_id> <status> to update.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
-        )
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if not candidate:
+                await query.edit_message_text(
+                    "My Applications\n\nLink your account to track applications scoped to your profile.\nUse /link <email> <password>.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Link Account", callback_data="menu:link")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+                )
+                return
+            app_res = await session.execute(select(Application).where(Application.candidate_id == candidate.id).order_by(Application.created_at.desc()).limit(10))
+            apps = app_res.scalars().all()
+            if not apps:
+                text = "My Applications\n\nNo applications yet.\nUse /apply <job_id> to track an application."
+            else:
+                lines = ["My Applications:\n"]
+                for app in apps:
+                    status = app.status or "tracked"
+                    lines.append(f"- {app.job_id[:8]} | {status}")
+                text = "\n".join(lines)
+        keyboard = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
         return
     if data == "menu:alerts":
         user = await _ensure_user(update)
