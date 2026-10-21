@@ -72,6 +72,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔎 Find Jobs", callback_data="menu:find")],
         [InlineKeyboardButton("👤 My Job Profile", callback_data="menu:profile")],
         [InlineKeyboardButton("⚙️ Job Preferences", callback_data="menu:prefs")],
+        [InlineKeyboardButton("⭐ Saved Jobs (N/A)", callback_data="menu:na:saved")],
         [InlineKeyboardButton("📋 My Applications", callback_data="menu:apps")],
         [InlineKeyboardButton("🔔 Job Alerts", callback_data="menu:alerts")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
@@ -905,9 +906,51 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not user:
             await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
             return
+        keyboard = [
+            [InlineKeyboardButton("⏸️ Pause Alerts", callback_data="alert:pause")],
+            [InlineKeyboardButton("▶️ Resume Alerts", callback_data="alert:resume")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+        ]
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            status = "Active" if tg_user and tg_user.is_active else "Inactive"
         await query.edit_message_text(
-            "Settings\n\nManage preferences with /settings.\nAlerts controlled by /start and /stop.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+            f"Settings\n\nAlerts: {status}\n\nManage preferences with /settings.\nUse buttons to pause/resume alerts.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+    if data == "alert:pause":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            if tg_user:
+                tg_user.is_active = False
+                await session.commit()
+        await query.edit_message_text("Alerts paused.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "alert:resume":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            if tg_user:
+                tg_user.is_active = True
+                await session.commit()
+        await query.edit_message_text("Alerts resumed.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "menu:na:saved":
+        await query.edit_message_text(
+            "Saved Jobs\n\nNot available in current build. This would need a saved_jobs/bookmarks model.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]),
         )
         return
     if data == "menu:help":
@@ -920,4 +963,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         await query.edit_message_text("Menu", reply_markup=_main_menu_keyboard())
     except Exception:
-        await query.message.reply_text("Menu", reply_markup=_main_menu_keyboard())
+        try:
+            await query.message.reply_text("Menu", reply_markup=_main_menu_keyboard())
+        except Exception:
+            pass
+
