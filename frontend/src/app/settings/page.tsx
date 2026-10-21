@@ -3,9 +3,10 @@
 import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { motion } from "framer-motion"
-import { User, Briefcase, Radar, Shield, Save, Trash2, Download } from "lucide-react"
-import { useState } from "react"
+import { User, Briefcase, Radar, Shield, Save, Trash2, Download, X, Plus } from "lucide-react"
+import { useState, useEffect } from "react"
 import { useToast } from "@/components/ui/toast"
+import { candidateService } from "@/services/api"
 
 export default function SettingsPage() {
   const [autoScan, setAutoScan] = useState(true)
@@ -14,6 +15,75 @@ export default function SettingsPage() {
   const [minMatch, setMinMatch] = useState(80)
   const [maxRisk, setMaxRisk] = useState(25)
   const { toast } = useToast()
+
+  const [profile, setProfile] = useState({
+    name: "Retro",
+    email: "retro@example.com",
+    preferred_roles: ["Python Backend", "Full Stack"],
+    skills: [] as string[],
+    preferred_locations: ["Nairobi", "Remote"],
+    experience_level: "mid",
+    salary_min: 200000,
+    salary_max: 400000,
+    remote_ok: true,
+  })
+  const [roleInput, setRoleInput] = useState("")
+  const [skillInput, setSkillInput] = useState("")
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    candidateService.getProfile().then((p: any) => {
+      setProfile({
+        name: p.name || "Retro",
+        email: p.email || "retro@example.com",
+        preferred_roles: p.preferred_roles || [],
+        skills: p.skills || [],
+        preferred_locations: p.preferred_locations || ["Nairobi", "Remote"],
+        experience_level: p.experience_level || "mid",
+        salary_min: p.salary_min ?? 200000,
+        salary_max: p.salary_max ?? 400000,
+        remote_ok: p.remote_ok ?? true,
+      })
+    }).catch(() => {})
+  }, [])
+
+  const addRole = () => {
+    const r = roleInput.trim()
+    if (!r) return
+    if (!profile.preferred_roles.includes(r)) {
+      setProfile({ ...profile, preferred_roles: [...profile.preferred_roles, r] })
+    }
+    setRoleInput("")
+  }
+
+  const removeRole = (r: string) => {
+    setProfile({ ...profile, preferred_roles: profile.preferred_roles.filter(x => x !== r) })
+  }
+
+  const addSkill = () => {
+    const s = skillInput.trim().toLowerCase()
+    if (!s) return
+    if (!profile.skills.includes(s)) {
+      setProfile({ ...profile, skills: [...profile.skills, s] })
+    }
+    setSkillInput("")
+  }
+
+  const removeSkill = (s: string) => {
+    setProfile({ ...profile, skills: profile.skills.filter(x => x !== s) })
+  }
+
+  const saveProfile = async () => {
+    setSaving(true)
+    try {
+      await candidateService.updateProfile(profile)
+      toast("Settings saved")
+    } catch (e: any) {
+      toast(e?.message || "Failed to save", "error")
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -26,15 +96,65 @@ export default function SettingsPage() {
             className="bg-surface border border-border rounded-xl p-6">
             <div className="flex items-center gap-2 mb-4">
               <User className="w-4 h-4 text-accent" />
-              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Profile</h2>
+              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Profile & Job Preferences</h2>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Field label="Name" defaultValue="Retro" />
-              <Field label="Email" defaultValue="retro@example.com" />
-              <Field label="Phone" placeholder="+254 7XX XXX XXX" />
-              <Field label="Location" defaultValue="Nairobi" />
-              <Field label="Preferred Roles" defaultValue="Python Backend, Full Stack" />
-              <Field label="Expected Salary" defaultValue="200K-400K KES" />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <Field label="Name" value={profile.name} onChange={(v: string) => setProfile({ ...profile, name: v })} />
+              <Field label="Email" value={profile.email} onChange={(v: string) => setProfile({ ...profile, email: v })} />
+              <Field label="Location" value={profile.preferred_locations[0] || "Nairobi"} onChange={(v: string) => setProfile({ ...profile, preferred_locations: [v, ...profile.preferred_locations.slice(1)] })} />
+              <Field label="Experience Level" value={profile.experience_level} onChange={(v: string) => setProfile({ ...profile, experience_level: v })} />
+            </div>
+
+            <div className="mb-4">
+              <label className="text-xs text-text-muted font-medium">Preferred Roles / Job Titles</label>
+              <p className="text-xs text-text-muted mb-2">Add job titles you want to find (e.g., "software engineer", "web developer")</p>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={roleInput}
+                  onChange={e => setRoleInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addRole())}
+                  placeholder="e.g., software engineer"
+                  className="flex-1 bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50"
+                />
+                <button onClick={addRole} className="px-3 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg text-sm flex items-center gap-1">
+                  <Plus className="w-3 h-3" /> Add
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {profile.preferred_roles.map(r => (
+                  <span key={r} className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-accent/10 text-accent border border-accent/30">
+                    {r}
+                    <button onClick={() => removeRole(r)}><X className="w-3 h-3" /></button>
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-text-muted font-medium">Skills / Keywords</label>
+              <p className="text-xs text-text-muted mb-2">Add skills to improve matching (e.g., "python", "react", "javascript")</p>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={skillInput}
+                  onChange={e => setSkillInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addSkill())}
+                  placeholder="e.g., python"
+                  className="flex-1 bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50"
+                />
+                <button onClick={addSkill} className="px-3 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg text-sm flex items-center gap-1">
+                  <Plus className="w-3 h-3" /> Add
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {profile.skills.map(s => (
+                  <span key={s} className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-surface-3 text-text-secondary border border-border">
+                    {s}
+                    <button onClick={() => removeSkill(s)}><X className="w-3 h-3" /></button>
+                  </span>
+                ))}
+              </div>
             </div>
           </motion.section>
 
@@ -105,8 +225,8 @@ export default function SettingsPage() {
             </div>
           </motion.section>
 
-          <button onClick={() => toast("Settings saved")} className="flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
-            <Save className="w-4 h-4" /> Save settings
+          <button onClick={saveProfile} disabled={saving} className="flex items-center gap-2 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
+            <Save className="w-4 h-4" /> {saving ? "Saving..." : "Save settings"}
           </button>
         </main>
       </div>
@@ -114,12 +234,18 @@ export default function SettingsPage() {
   )
 }
 
-function Field({ label, defaultValue, placeholder }: { label: string; defaultValue?: string; placeholder?: string }) {
+function Field({ label, value, defaultValue, placeholder, onChange }: { label: string; value?: string; defaultValue?: string; placeholder?: string; onChange?: (v: string) => void }) {
   return (
     <div>
       <label className="text-xs text-text-muted font-medium">{label}</label>
-      <input type="text" defaultValue={defaultValue} placeholder={placeholder}
-        className="w-full mt-1 bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors" />
+      <input
+        type="text"
+        value={value !== undefined ? value : undefined}
+        defaultValue={value === undefined ? defaultValue : undefined}
+        placeholder={placeholder}
+        onChange={e => onChange?.(e.target.value)}
+        className="w-full mt-1 bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
+      />
     </div>
   )
 }
