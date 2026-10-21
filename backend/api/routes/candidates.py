@@ -29,6 +29,7 @@ def _candidate_to_response(c: Candidate) -> CandidateProfile:
         email=c.email,
         location="",
         preferred_locations=c.preferred_locations_list,
+        preferred_roles=c.preferred_roles_list if hasattr(c, "preferred_roles_list") else [],
         skills=c.skills_list,
         experience_level=c.experience_level or "",
         experience_years=None,
@@ -70,7 +71,10 @@ async def create_or_update_profile(
         candidate.email = profile.email or candidate.email
         candidate.skills_list = profile.skills
         candidate.preferred_locations_list = profile.preferred_locations
-        candidate.preferred_roles_list = profile.preferred_roles if hasattr(profile, "preferred_roles") else []
+        try:
+            candidate.preferred_roles_list = getattr(profile, "preferred_roles", []) or []
+        except Exception:
+            pass
         candidate.experience_level = profile.experience_level
         candidate.salary_min = int(profile.salary_min) if profile.salary_min else candidate.salary_min
         candidate.salary_max = int(profile.salary_max) if profile.salary_max else candidate.salary_max
@@ -89,6 +93,7 @@ async def create_or_update_profile(
             email=profile.email,
             skills=json.dumps(profile.skills),
             preferred_locations=json.dumps(profile.preferred_locations),
+            preferred_roles=json.dumps(getattr(profile, "preferred_roles", []) or []),
             experience_level=profile.experience_level,
             salary_min=int(profile.salary_min) if profile.salary_min else None,
             salary_max=int(profile.salary_max) if profile.salary_max else None,

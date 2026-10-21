@@ -171,6 +171,7 @@ class CandidateProfile(BaseModel):
     email: str = Field("", description="Email address")
     location: str = Field("", description="Current location")
     preferred_locations: list[str] = Field(default_factory=list, description="Preferred work locations")
+    preferred_roles: list[str] = Field(default_factory=list, description="Preferred job titles/roles")
     skills: list[str] = Field(default_factory=list, description="Technical and soft skills")
     experience_level: str = Field("", description="Experience level (junior/mid/senior)")
     experience_years: int | None = Field(None, ge=0, description="Years of experience")
