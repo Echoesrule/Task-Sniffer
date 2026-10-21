@@ -155,6 +155,7 @@ class JobStatsResponse(BaseModel):
     by_remote: dict[str, int] = Field(default_factory=dict, description="Remote vs on-site counts")
     avg_risk_score: float = Field(0.0, description="Average risk score across jobs")
     avg_match_score: float = Field(0.0, description="Average match score across jobs")
+    latest_created_at: datetime | None = Field(None, description="Most recent job creation timestamp")
 
 
 # ---------------------------------------------------------------------------

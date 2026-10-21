@@ -76,6 +76,7 @@ async def get_job_stats(db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
 
     avg_risk = (await db.execute(select(sa_func.avg(Job.risk_score)))).scalar() or 0.0
     avg_match = (await db.execute(select(sa_func.avg(Job.match_score)))).scalar() or 0.0
+    latest_created = (await db.execute(select(sa_func.max(Job.created_at)))).scalar()
 
     return JobStatsResponse(
         total_jobs=total,
@@ -84,6 +85,7 @@ async def get_job_stats(db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
         by_remote={},
         avg_risk_score=round(float(avg_risk), 2),
         avg_match_score=round(float(avg_match), 2),
+        latest_created_at=latest_created,
     )
 
 
