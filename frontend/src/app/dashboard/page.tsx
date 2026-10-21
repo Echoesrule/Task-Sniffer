@@ -64,7 +64,6 @@ export default function DashboardPage() {
       <div className="flex-1 ml-[240px]">
         <Header title="Overview" />
         <main className="p-6 max-w-[1400px] mx-auto space-y-8">
-          {/* Greeting */}
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
             <p className="text-2xl font-bold text-text-primary">{greeting}</p>
             <p className="text-sm text-text-secondary mt-1">
@@ -79,7 +78,6 @@ export default function DashboardPage() {
             </p>
           </motion.div>
 
-          {/* Stats */}
           <motion.div className="grid grid-cols-2 lg:grid-cols-4 gap-4"
             initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, delay: 0.1 }}>
             {loading ? (
@@ -98,7 +96,6 @@ export default function DashboardPage() {
             )}
           </motion.div>
 
-          {/* Recent Jobs */}
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4, delay: 0.2 }}>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-text-primary">Recent Jobs</h2>
@@ -133,7 +130,6 @@ export default function DashboardPage() {
                             </div>
                             <RiskBadge level={job.risk_level ?? "LOW"} score={job.risk_score} />
                           </div>
-
                           <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                             {(job.skills || []).slice(0, 5).map((skill: string) => (
                               <span key={skill} className="text-[11px] px-2 py-0.5 rounded-md bg-surface-3 text-text-secondary border border-border">
@@ -141,7 +137,6 @@ export default function DashboardPage() {
                               </span>
                             ))}
                           </div>
-
                           <div className="flex items-center gap-1.5 mt-2.5 text-[11px] text-text-muted">
                             <Clock className="w-3 h-3" />
                             <span>{job.posted_at ? timeAgo(job.posted_at) : ""}</span>
@@ -165,7 +160,6 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
-          </motion.div>
           </motion.div>
         </main>
       </div>
