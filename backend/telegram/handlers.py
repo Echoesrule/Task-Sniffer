@@ -21,6 +21,7 @@ from backend.models.database import (
     User,
 )
 from backend.security import verify_password
+from backend.sources.urls import is_safe_fetch_url
 
 PROFILE_WAIT = 1
 
@@ -712,7 +713,10 @@ async def profile_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     data = query.data or ""
     db = get_db()
 
@@ -720,11 +724,14 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             await query.edit_message_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
         except Exception:
-            await query.message.reply_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
+            try:
+                await query.message.reply_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
+            except Exception:
+                pass
         return
     if data == "menu:find":
         keyboard = [
-            [InlineKeyboardButton("🔥 Top Jobs", callback_data="menu:topjobs")],
+            [InlineKeyboardButton("🔥 Recommended", callback_data="jobs:rec:1")],
             [InlineKeyboardButton("🔍 Search", callback_data="menu:search")],
             [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
         ]
@@ -734,12 +741,66 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
-            await query.message.reply_text("Find Jobs\n\nBrowse recommended jobs or search by keyword.", reply_markup=InlineKeyboardMarkup(keyboard))
+            try:
+                await query.message.reply_text("Find Jobs\n\nBrowse recommended jobs or search by keyword.", reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data.startswith("jobs:rec:"):
+        try:
+            page = int(data.split(":")[-1])
+        except Exception:
+            page = 1
+        page = max(1, page)
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            q = select(Job).where(Job.status == "discovered").order_by(Job.match_score.desc())
+            result = await session.execute(q.offset((page-1)*5).limit(5))
+            jobs = result.scalars().all()
+            if not jobs:
+                text = "Recommended Jobs\n\nNothing to show right now."
+            else:
+                lines = [f"Recommended Jobs (page {page}):\n"]
+                for i, job in enumerate(jobs, 1+(page-1)*5):
+                    remote = " [Remote]" if job.remote else ""
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {job.match_score:.0%}\n   ID: {job.id[:8]}")
+                text = "\n\n".join(lines)
+                if not candidate:
+                    text += "\n\nTip: Link your account and complete your profile for better matches."
+        keyboard = []
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"jobs:rec:{page-1}"))
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"jobs:rec:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:find"), InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+        try:
+            await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
         return
     if data == "menu:topjobs":
         user = await _ensure_user(update)
         if not user:
-            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
             return
         async with db.async_session_factory() as session:
             result = await session.execute(
@@ -755,7 +816,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 lines = ["Top Jobs:\n"]
                 for i, job in enumerate(jobs, 1):
                     remote = " [Remote]" if job.remote else ""
-                    lines.append(f"{i}. {job.title}\n   {job.company}{remote}\n   Match: {job.match_score:.0%}\n   ID: {job.id[:8]}")
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {job.match_score:.0%}\n   ID: {job.id[:8]}")
                 text = "\n\n".join(lines) + "\n\nUse /apply <job_id> to track."
         keyboard = [
             [InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],
@@ -764,7 +827,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
         except Exception:
-            await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
         return
     if data == "menu:search":
         await query.edit_message_text(
