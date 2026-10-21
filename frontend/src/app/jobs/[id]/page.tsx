@@ -37,7 +37,8 @@ function toJob(r: any): Job {
     risk_score: r.risk_score ?? 0,
     risk_level: r.risk_level ?? undefined,
     status: r.status,
-  }
+    url_status: r.url_status,
+  } as Job
 }
 
 export default function JobDetailPage() {
@@ -139,14 +140,27 @@ export default function JobDetailPage() {
                   )}
                 </div>
                 <div className="flex gap-3 mt-4">
-                  <a href={job.url} target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-                    <Send className="w-4 h-4" /> Apply
-                  </a>
+                  {job.url_status === 'NEEDS_REVIEW' ? (
+                    <button
+                      disabled
+                      title="Link needs review - not validated as direct application URL"
+                      className="inline-flex items-center gap-2 bg-surface-2 border border-amber text-amber text-sm font-medium px-4 py-2 rounded-lg cursor-not-allowed"
+                    >
+                      <Send className="w-4 h-4" /> Link needs review
+                    </button>
+                  ) : (
+                    <a href={job.url} target="_blank" rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+                      <Send className="w-4 h-4" /> Apply
+                    </a>
+                  )}
                   <button className="inline-flex items-center gap-2 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-sm font-medium px-4 py-2 rounded-lg transition-colors">
                     <BookmarkPlus className="w-4 h-4" /> Save
                   </button>
                 </div>
+                {job.url_status && job.url_status !== 'VALID' && (
+                  <p className="text-xs text-amber mt-2">This link has not been fully validated for direct application.</p>
+                )}
               </div>
             </div>
           </motion.div>

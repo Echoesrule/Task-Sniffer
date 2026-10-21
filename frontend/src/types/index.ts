@@ -25,6 +25,7 @@ export interface Job {
   risk_flags?: RiskFlag[]
   status: string
   created_at?: string
+  url_status?: string
 }
 
 export interface MatchBreakdown {
