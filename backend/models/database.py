@@ -474,6 +474,15 @@ class TelegramUser(Base):
     username = Column(String(255), nullable=True)
     first_name = Column(String(255), nullable=True)
 
+    # Explicit account link to a web candidate profile. Never populated from the
+    # Telegram numeric id; only set by the credential-verified /link command.
+    candidate_id = Column(
+        String(36),
+        ForeignKey("candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     is_active = Column(Boolean, default=True)
     keywords = Column(Text, default="[]")
     exclude_keywords = Column(Text, default="[]")
@@ -604,5 +613,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "skills_detail": "TEXT DEFAULT '[]'",
         "skills_required": "TEXT DEFAULT '[]'",
         "skills_preferred": "TEXT DEFAULT '[]'",
+    },
+    "telegram_users": {
+        "candidate_id": "VARCHAR(36)",
     },
 }

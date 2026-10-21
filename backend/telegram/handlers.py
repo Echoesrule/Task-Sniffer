@@ -16,8 +16,11 @@ from backend.models.database import (
     Source,
     Application,
     ApplicationStatusChange,
+    Candidate,
     TelegramUser,
+    User,
 )
+from backend.security import verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,14 @@ async def _ensure_user(update: Update) -> TelegramUser | None:
     return user
 
 
+async def _get_linked_candidate(user: TelegramUser, session):
+    """Return the linked Candidate if the TelegramUser is linked and exists."""
+    if not user.candidate_id:
+        return None
+    result = await session.execute(select(Candidate).where(Candidate.id == user.candidate_id))
+    return result.scalars().first()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     db = get_db()
@@ -84,6 +95,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Commands:\n"
                 "/top - Latest high-match jobs\n"
                 "/search <query> - Search jobs\n"
+                "/link <email> <password> - Link your web account\n"
+                "/unlink - Unlink your web account\n"
                 "/apply <job_id> - Track application\n"
                 "/my_applications - View tracked apps\n"
                 "/update_status <app_id> <status> - Update status\n"
@@ -111,6 +124,80 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         else:
             await update.message.reply_text("You're not registered. Use /start to begin.")
+
+
+async def link_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = await _ensure_user(update)
+    if not user:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /link <email> <password>")
+        return
+
+    email = context.args[0].strip().lower()
+    password = " ".join(context.args[1:])
+
+    db = get_db()
+    async with db.async_session_factory() as session:
+        result = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = result.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+
+        if tg_user.candidate_id:
+            candidate_res = await session.execute(
+                select(Candidate).where(Candidate.id == tg_user.candidate_id)
+            )
+            linked = candidate_res.scalars().first()
+            label = linked.email if linked and linked.email else tg_user.candidate_id
+            await update.message.reply_text(f"This account is already linked to {label}. Use /unlink first.")
+            return
+
+        user_res = await session.execute(select(User).where(User.email == email))
+        web_user = user_res.scalars().first()
+        if not web_user or not verify_password(password, web_user.hashed_password):
+            await update.message.reply_text("Invalid email or password. Account not linked.")
+            return
+        if not web_user.is_active:
+            await update.message.reply_text("That web account is inactive. Account not linked.")
+            return
+
+        cand_res = await session.execute(select(Candidate).where(Candidate.user_id == web_user.id))
+        candidate = cand_res.scalars().first()
+        if not candidate:
+            candidate = Candidate(
+                user_id=web_user.id,
+                name=web_user.email.split("@")[0],
+                email=web_user.email,
+            )
+            session.add(candidate)
+            await session.flush()
+
+        tg_user.candidate_id = candidate.id
+        await session.commit()
+        await update.message.reply_text(f"Linked to {web_user.email}. You can now use /apply and /my_applications.")
+
+
+async def unlink_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = await _ensure_user(update)
+    if not user:
+        return
+
+    db = get_db()
+    async with db.async_session_factory() as session:
+        result = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = result.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        if not tg_user.candidate_id:
+            await update.message.reply_text("No linked web account.")
+            return
+        tg_user.candidate_id = None
+        await session.commit()
+        await update.message.reply_text("Account unlinked.")
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -350,7 +437,8 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text(
             "Usage: /apply <job_id>\n"
-            "Use /top or /search to find job IDs."
+            "Use /top or /search to find job IDs.\n"
+            "You must be linked with /link <email> <password> first."
         )
         return
 
@@ -358,6 +446,16 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_db()
 
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Job).where(Job.id.startswith(job_ref))
         )
@@ -369,7 +467,7 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         existing_app = await session.execute(
             select(Application).where(
-                Application.candidate_id == user.id,
+                Application.candidate_id == candidate.id,
                 Application.job_id == job.id,
             )
         )
@@ -378,7 +476,7 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         app = Application(
-            candidate_id=user.id,
+            candidate_id=candidate.id,
             job_id=job.id,
             status="shortlisted",
             applied_at=datetime.now(timezone.utc),
@@ -404,9 +502,19 @@ async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     db = get_db()
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Application)
-            .where(Application.candidate_id == user.id)
+            .where(Application.candidate_id == candidate.id)
             .order_by(Application.created_at.desc())
         )
         apps = result.scalars().all()
@@ -424,9 +532,13 @@ async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             job_title = job.title if job else "Unknown"
             job_company = job.company if job else "Unknown"
 
+            if app.match_score is not None:
+                match_str = f"{app.match_score:.0%}"
+            else:
+                match_str = "N/A"
             lines.append(
                 f"- {job_title} @ {job_company}\n"
-                f"  Status: {app.status} | Match: {app.match_score:.0% if app.match_score else 'N/A'}\n"
+                f"  Status: {app.status} | Match: {match_str}\n"
                 f"  App ID: {app.id[:8]}"
             )
 
@@ -461,9 +573,19 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     db = get_db()
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Application).where(
-                Application.candidate_id == user.id,
+                Application.candidate_id == candidate.id,
                 Application.id.startswith(app_ref),
             )
         )

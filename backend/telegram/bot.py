@@ -24,6 +24,8 @@ from backend.telegram.handlers import (
     my_applications,
     update_status,
     top_jobs,
+    link_account,
+    unlink_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ def create_bot_app() -> Application:
     application.add_handler(CommandHandler("search", search))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("sources", sources))
+    application.add_handler(CommandHandler("link", link_account))
+    application.add_handler(CommandHandler("unlink", unlink_account))
     application.add_handler(CommandHandler("apply", apply_job))
     application.add_handler(CommandHandler("my_applications", my_applications))
     application.add_handler(CommandHandler("update_status", update_status))
