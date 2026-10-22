@@ -1,11 +1,11 @@
-"""Seed the default candidate profile and (re)compute match scores for jobs.
+"""Recompute match scores for an explicitly selected candidate.
 
 Wires the previously-uninvoked :class:`JobScorer` to the persisted corpus:
 it ensures a candidate profile exists, then scores every job against it and
-writes ``match_score`` / ``match_breakdown`` / ``classification``.
+writes candidate-specific rows in ``candidate_job_scores``.
 
 Usage:
-    python scripts/score_jobs.py [--db work_bot_hunter.db] [--only-empty]
+    python scripts/score_jobs.py --candidate-id <id> [--db <url>] [--only-empty]
 """
 
 from __future__ import annotations
@@ -21,29 +21,39 @@ from sqlalchemy import select  # noqa: E402
 
 from backend.config import get_settings  # noqa: E402
 from backend.matching.scoring import (  # noqa: E402
-    apply_score,
     candidate_to_scoring_dict,
-    ensure_default_candidate,
     score_job,
+    store_score,
 )
-from backend.models.database import Database, Job  # noqa: E402
+from backend.models.database import Candidate, CandidateJobScore, Database, Job  # noqa: E402
 
 
-async def _run(db_url: str, only_empty: bool) -> tuple[str, str, int]:
+async def _run(db_url: str, candidate_id: str, only_empty: bool) -> tuple[str, str, int]:
     db = Database(db_url)
     await db.init_db()
     try:
         async with db.async_session_factory() as session:
-            candidate = await ensure_default_candidate(session)
+            candidate = await session.get(Candidate, candidate_id)
+            if candidate is None:
+                raise ValueError(f"Candidate {candidate_id!r} was not found")
             candidate_dict = candidate_to_scoring_dict(candidate)
+            existing_scores = {
+                score.job_id: score
+                for score in (await session.execute(
+                    select(CandidateJobScore).where(CandidateJobScore.candidate_id == candidate.id)
+                )).scalars().all()
+            }
 
             stmt = select(Job)
             if only_empty:
-                stmt = stmt.where((Job.match_score == 0.0) | (Job.match_score.is_(None)))
+                existing = select(CandidateJobScore.job_id).where(
+                    CandidateJobScore.candidate_id == candidate.id
+                )
+                stmt = stmt.where(Job.id.not_in(existing))
             jobs = (await session.execute(stmt)).scalars().all()
 
             for job in jobs:
-                apply_score(job, score_job(job, candidate_dict))
+                store_score(session, candidate, job, score_job(job, candidate_dict), existing_scores.get(job.id))
             await session.commit()
             return candidate.name, candidate.email, len(jobs)
     finally:
@@ -53,6 +63,7 @@ async def _run(db_url: str, only_empty: bool) -> tuple[str, str, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=None, help="override database URL")
+    parser.add_argument("--candidate-id", required=True, help="candidate whose scores should be recalculated")
     parser.add_argument(
         "--only-empty",
         action="store_true",
@@ -61,7 +72,7 @@ def main() -> int:
     args = parser.parse_args()
 
     db_url = args.db or get_settings().database_url
-    name, email, scored = asyncio.run(_run(db_url, args.only_empty))
+    name, email, scored = asyncio.run(_run(db_url, args.candidate_id, args.only_empty))
     print(f"candidate={name} <{email}> scored_jobs={scored}")
     return 0
 

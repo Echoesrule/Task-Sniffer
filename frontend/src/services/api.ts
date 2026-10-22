@@ -1,6 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-function getAuthToken(): string | null {
+export function getAuthToken(): string | null {
   if (typeof window === "undefined") return null
   try {
     return localStorage.getItem("auth_token") || localStorage.getItem("access_token") || null
@@ -10,9 +10,8 @@ function getAuthToken(): string | null {
 }
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  }
+  const isFormData = typeof FormData !== "undefined" && options?.body instanceof FormData
+  const headers: Record<string, string> = isFormData ? {} : { "Content-Type": "application/json" }
   const token = getAuthToken()
   if (token) {
     headers["Authorization"] = `Bearer ${token}`
@@ -78,18 +77,60 @@ export const jobsService = {
     return fetchAPI<{ jobs: any[]; total: number }>(`/jobs${qs}`)
   },
   get: (id: string) => fetchAPI<any>(`/jobs/${id}`),
-  search: (query: string) => fetchAPI<{ jobs: any[]; total: number }>("/jobs/search", { method: "POST", body: JSON.stringify({ query }) }),
+  search: (query: string, page = 1, page_size = 20) => fetchAPI<{ jobs: any[]; total: number }>("/jobs/search", { method: "POST", body: JSON.stringify({ query, page, page_size }) }),
   stats: () => fetchAPI<any>("/jobs/stats"),
   analyze: (id: string) => fetchAPI<any>(`/jobs/${id}/analyze`, { method: "POST" }),
+}
+
+export const authService = {
+  login: async (email: string, password: string) => {
+    const result = await fetchAPI<{ access_token: string; email: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) })
+    if (typeof window !== "undefined") localStorage.setItem("auth_token", result.access_token)
+    return result
+  },
+  register: async (email: string, password: string) => {
+    const result = await fetchAPI<{ access_token: string; email: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password }) })
+    if (typeof window !== "undefined") localStorage.setItem("auth_token", result.access_token)
+    return result
+  },
+  me: () => fetchAPI<{ email: string; user_id: string }>("/auth/me"),
+  logout: () => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("auth_token")
+      localStorage.removeItem("access_token")
+    }
+  },
 }
 
 export const candidateService = {
   getProfile: () => fetchAPI<any>("/candidate/profile"),
   updateProfile: (data: any) => fetchAPI<any>("/candidate/profile", { method: "POST", body: JSON.stringify(data) }),
+  getCv: () => fetchAPI<{ filename: string | null; size: number | null }>("/candidate/cv"),
+  uploadCv: (file: File) => {
+    const body = new FormData()
+    body.append("file", file)
+    return fetchAPI<any>("/candidate/cv", { method: "POST", body })
+  },
+  deleteCv: () => fetchAPI<{ message: string }>("/candidate/cv", { method: "DELETE" }),
+  downloadCv: async () => {
+    const headers: Record<string, string> = {}
+    const token = getAuthToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+    const res = await fetch(`${API_BASE}/candidate/cv/file`, { headers })
+    if (!res.ok) throw new Error(res.status === 404 ? "No CV uploaded" : "Could not download CV")
+    return res.blob()
+  },
 }
 
 export const applicationsService = {
-  list: (status?: string) => fetchAPI<any[]>(`/applications${status ? `?status=${status}` : ""}`),
+  list: (params?: { status?: string; page?: number; page_size?: number }) => {
+    const qs = new URLSearchParams()
+    if (params?.status) qs.set("status", params.status)
+    if (params?.page) qs.set("page", String(params.page))
+    if (params?.page_size) qs.set("page_size", String(params.page_size))
+    return fetchAPI<any[]>(`/applications${qs.size ? `?${qs}` : ""}`)
+  },
+  get: (id: string) => fetchAPI<any>(`/applications/${id}`),
   create: (data: any) => fetchAPI<any>("/applications", { method: "POST", body: JSON.stringify(data) }),
   update: (id: string, data: any) => fetchAPI<any>(`/applications/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   stats: () => fetchAPI<any>("/applications/stats"),

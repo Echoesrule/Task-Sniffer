@@ -4,7 +4,7 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { MatchScore } from "@/components/ui/match-score"
 import { RiskBadge } from "@/components/ui/risk-badge"
-import { jobsService } from "@/services/api"
+import { jobsService, applicationsService } from "@/services/api"
 import type { Job } from "@/types"
 import { useParams } from "next/navigation"
 import { motion } from "framer-motion"
@@ -13,8 +13,10 @@ import {
   Check, AlertTriangle, ChevronLeft, BookmarkPlus, Send, Loader2
 } from "lucide-react"
 import { timeAgo } from "@/lib/utils"
+import { applicationHref as getApplicationHref, sourceHref as getSourceHref } from "@/lib/job-links"
 import Link from "next/link"
 import { useState, useEffect } from "react"
+import { useToast } from "@/components/ui/toast"
 
 function toJob(r: any): Job {
   return {
@@ -26,13 +28,14 @@ function toJob(r: any): Job {
     remote: r.remote,
     salary: r.salary,
     description: r.description,
-    url: r.source_url || r.canonical_url || r.url,
+    url: r.url || "",
+    source_url: r.source_url || r.canonical_url || "",
     source: r.source,
     skills: r.skills ?? [],
     experience: r.experience,
     posted_at: r.posted_at ?? undefined,
     fetched_at: r.fetched_at ?? undefined,
-    match_score: r.match_score ?? 0,
+    match_score: r.match_score,
     match_breakdown: r.match_breakdown ?? undefined,
     risk_score: r.risk_score ?? 0,
     risk_level: r.risk_level ?? undefined,
@@ -42,11 +45,14 @@ function toJob(r: any): Job {
 }
 
 export default function JobDetailPage() {
+  const { toast } = useToast()
   const params = useParams()
   const id = String(params.id)
   const [job, setJob] = useState<Job | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [tracking, setTracking] = useState(false)
+  const [tracked, setTracked] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -101,6 +107,19 @@ export default function JobDetailPage() {
   }
 
   const breakdown = job.match_breakdown ?? {}
+  const applicationUrl = getApplicationHref(job)
+  const originalListingUrl = getSourceHref(job)
+  const trackJob = async () => {
+    setTracking(true)
+    try {
+      await applicationsService.create({ job_id: job.id, match_score: job.match_score, risk_score: job.risk_score })
+      setTracked(true)
+      toast("Job added to your applications")
+    } catch (e: any) {
+      toast(e?.status === 409 ? "This job is already tracked" : (e?.message || "Could not track this job"), "error")
+      if (e?.status === 409) setTracked(true)
+    } finally { setTracking(false) }
+  }
   const breakdownEntries = [
     { label: "Skills Match", value: breakdown.skills },
     { label: "Experience Match", value: breakdown.experience },
@@ -124,7 +143,7 @@ export default function JobDetailPage() {
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
             className="bg-surface border border-border rounded-xl p-6">
             <div className="flex items-start gap-5">
-              <MatchScore score={job.match_score ?? 0} size="lg" />
+              <MatchScore score={job.match_score} size="lg" />
               <div className="flex-1">
                 <h1 className="text-xl font-bold text-text-primary">{job.title}</h1>
                 <div className="flex items-center gap-2 mt-1 text-sm text-text-secondary">
@@ -140,22 +159,22 @@ export default function JobDetailPage() {
                   )}
                 </div>
                 <div className="flex gap-3 mt-4">
-                  {job.url_status === 'NEEDS_REVIEW' ? (
+                  {!applicationUrl ? (
                     <button
                       disabled
-                      title="Link needs review - not validated as direct application URL"
+                      title="An application link has not been validated for this job"
                       className="inline-flex items-center gap-2 bg-surface-2 border border-amber text-amber text-sm font-medium px-4 py-2 rounded-lg cursor-not-allowed"
                     >
                       <Send className="w-4 h-4" /> Link needs review
                     </button>
                   ) : (
-                    <a href={job.url} target="_blank" rel="noopener noreferrer"
+                    <a href={applicationUrl} target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-2 bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
                       <Send className="w-4 h-4" /> Apply
                     </a>
                   )}
-                  <button className="inline-flex items-center gap-2 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-sm font-medium px-4 py-2 rounded-lg transition-colors">
-                    <BookmarkPlus className="w-4 h-4" /> Save
+                  <button onClick={() => void trackJob()} disabled={tracking || tracked} className="inline-flex items-center gap-2 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50">
+                    <BookmarkPlus className="w-4 h-4" /> {tracking ? "Saving…" : tracked ? "Tracked" : "Track application"}
                   </button>
                 </div>
                 {job.url_status && job.url_status !== 'VALID' && (
@@ -265,10 +284,10 @@ export default function JobDetailPage() {
                 )}
               </motion.div>
 
-              <a href={job.url} target="_blank" rel="noopener noreferrer"
+              {originalListingUrl && <a href={originalListingUrl} target="_blank" rel="noopener noreferrer"
                 className="flex items-center justify-center gap-2 bg-surface-2 border border-border text-text-secondary hover:text-text-primary text-sm font-medium px-4 py-2.5 rounded-lg transition-colors">
                 <ExternalLink className="w-4 h-4" /> View original listing
-              </a>
+              </a>}
             </div>
           </div>
         </main>

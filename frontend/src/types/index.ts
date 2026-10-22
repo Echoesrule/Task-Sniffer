@@ -12,13 +12,15 @@ export interface Job {
   salary_currency?: string
   description: string
   url: string
+  source_url?: string
+  canonical_url?: string
   source: string
   skills: string[]
   experience: string
   employment_type?: string
   posted_at?: string
   fetched_at?: string
-  match_score?: number
+  match_score?: number | null
   match_breakdown?: MatchBreakdown
   risk_score?: number
   risk_level?: "LOW" | "MEDIUM" | "HIGH"
@@ -77,7 +79,7 @@ export interface Application {
 export interface ApplicationStats {
   total: number
   by_status: Record<string, number>
-  avg_match_score: number
+  avg_match_score: number | null
   avg_risk_score: number
   acceptance_rate: number
 }
@@ -85,7 +87,7 @@ export interface ApplicationStats {
 export interface SourceStats {
   source: string
   total_jobs: number
-  avg_match_score: number
+  avg_match_score: number | null
   avg_risk_score: number
   application_count: number
 }
@@ -95,8 +97,8 @@ export interface MatchDistribution {
   good: number
   fair: number
   poor: number
-  avg_score: number
-  median_score: number
+  avg_score: number | null
+  median_score: number | null
 }
 
 export interface AnalyticsOverview {
@@ -104,7 +106,7 @@ export interface AnalyticsOverview {
   total_applications: number
   total_shortlisted: number
   total_rejected: number
-  avg_match_score: number
+  avg_match_score: number | null
   avg_risk_score: number
   top_sources: SourceStats[]
 }
@@ -115,7 +117,7 @@ export interface JobStats {
   by_country: Record<string, number>
   by_remote: Record<string, number>
   avg_risk_score: number
-  avg_match_score: number
+  avg_match_score: number | null
 }
 
 export interface ActivityEvent {

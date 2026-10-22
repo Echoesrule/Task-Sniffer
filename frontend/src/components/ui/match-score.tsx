@@ -3,12 +3,20 @@
 import { cn } from "@/lib/utils"
 
 interface MatchScoreProps {
-  score: number
+  score: number | null | undefined
   size?: "sm" | "md" | "lg"
   showLabel?: boolean
 }
 
 export function MatchScore({ score, size = "md", showLabel = true }: MatchScoreProps) {
+  if (score == null) {
+    return (
+      <div className="flex flex-col items-center gap-0.5" aria-label="Match score not available">
+        <span className={cn("font-bold tabular-nums text-text-muted", size === "lg" ? "text-xl" : "text-sm")}>—</span>
+        {showLabel && size !== "sm" && <span className="text-[10px] font-medium text-text-muted uppercase tracking-wider">Not scored</span>}
+      </div>
+    )
+  }
   const pct = Math.round(score * 100)
   const color = pct >= 80 ? "text-green" : pct >= 60 ? "text-amber" : "text-red"
   const ringColor = pct >= 80 ? "stroke-green" : pct >= 60 ? "stroke-amber" : "stroke-red"

@@ -90,11 +90,7 @@ class _LegacyAdapter(JobSourceAdapter):
         return classes[self._legacy_class](kwargs)
 
     async def fetch_listings(self, *, limit: int | None = None, limiter=None) -> list[ListingItem]:
-        try:
-            raw_jobs = await self._legacy.fetch_jobs() or []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[%s] legacy fetch_jobs failed: %s", self.name, exc)
-            return []
+        raw_jobs = await self._legacy.fetch_jobs() or []
         items: list[ListingItem] = []
         for job in raw_jobs:
             items.append(

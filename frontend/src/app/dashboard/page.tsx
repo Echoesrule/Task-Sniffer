@@ -6,7 +6,7 @@ import { StatCard } from "@/components/ui/stat-card"
 import { MatchScore } from "@/components/ui/match-score"
 import { RiskBadge } from "@/components/ui/risk-badge"
 import { StatCardSkeleton } from "@/components/ui/skeletons"
-import { jobsService } from "@/services/api"
+import { jobsService, applicationsService } from "@/services/api"
 import { timeAgo } from "@/lib/utils"
 import { motion } from "framer-motion"
 import {
@@ -22,20 +22,24 @@ const STALE_THRESHOLD_HOURS = 24
 export default function DashboardPage() {
   const [stats, setStats] = useState<any>(null)
   const [recentJobs, setRecentJobs] = useState<any[]>([])
+  const [applicationStats, setApplicationStats] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    Promise.all([
+    Promise.allSettled([
       jobsService.stats(),
       jobsService.list({ page_size: "5" }),
+      applicationsService.stats(),
     ])
-      .then(([statsRes, listRes]) => {
+      .then(([statsResult, listResult, appResult]) => {
         if (cancelled) return
-        setStats(statsRes)
-        setRecentJobs(listRes.jobs || [])
+        if (statsResult.status === "rejected") throw statsResult.reason
+        setStats(statsResult.value)
+        setRecentJobs(listResult.status === "fulfilled" ? listResult.value.jobs || [] : [])
+        setApplicationStats(appResult.status === "fulfilled" ? appResult.value : null)
         setError(null)
       })
       .catch(err => {
@@ -54,9 +58,7 @@ export default function DashboardPage() {
   const isStale = latest ? (Date.now() - new Date(latest).getTime() > STALE_THRESHOLD_HOURS * 3600 * 1000) : false
   const lastUpdated = latest ? timeAgo(latest) : null
 
-  const strongMatches = recentJobs
-    .filter((j: any) => (j.match_score ?? 0) >= 0.75)
-    .length
+  const strongMatches = stats?.strong_matches ?? 0
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -90,8 +92,8 @@ export default function DashboardPage() {
               <>
                 <StatCard icon={Briefcase} label="Jobs Found" value={stats?.total_jobs ?? 0} sublabel="from sources" />
                 <StatCard icon={Target} label="Strong Matches" value={strongMatches} sublabel="score ≥ 0.75" />
-                <StatCard icon={Send} label="Applications" value={0} sublabel="tracked" />
-                <StatCard icon={CalendarCheck} label="Interviews" value={0} sublabel="scheduled" />
+                <StatCard icon={Send} label="Applications" value={applicationStats?.total ?? "—"} sublabel={applicationStats ? "tracked" : "Sign in to view"} />
+                <StatCard icon={CalendarCheck} label="Interviews" value={applicationStats?.by_status?.interview ?? "—"} sublabel={applicationStats ? "tracked" : "Sign in to view"} />
               </>
             )}
           </motion.div>
@@ -113,7 +115,7 @@ export default function DashboardPage() {
                   <Link href={`/jobs/${job.id}`}>
                     <div className="bg-surface border border-border rounded-xl p-5 hover:border-border-light hover:bg-surface-2 transition-all cursor-pointer group">
                       <div className="flex items-start gap-4">
-                        <MatchScore score={job.match_score ?? 0} size="lg" />
+                        <MatchScore score={job.match_score} size="lg" />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-start justify-between gap-2">
                             <div>

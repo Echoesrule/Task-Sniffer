@@ -32,7 +32,7 @@ def get_default_prefs() -> dict:
     }
 
 
-async def test_api_scraper(name: str, scraper_cls, cfg: dict):
+async def demo_api_scraper(name: str, scraper_cls, cfg: dict):
     """Test a single API-based scraper."""
     print(f"\n{'='*60}")
     print(f"  Testing: {name}")
@@ -71,7 +71,7 @@ async def test_api_scraper(name: str, scraper_cls, cfg: dict):
         await scraper.client.aclose()
 
 
-async def test_scraper_pipeline():
+async def demo_scraper_pipeline():
     """Test each scraper individually."""
     sources = config.sources
     prefs = get_default_prefs()
@@ -96,10 +96,10 @@ async def test_scraper_pipeline():
 
     for name, cls, cfg in api_scrapers:
         if cfg.get("enabled", True):
-            await test_api_scraper(name, cls, cfg)
+            await demo_api_scraper(name, cls, cfg)
 
 
-async def test_analysis_engine():
+async def demo_analysis_engine():
     """Test analysis engine with sample jobs."""
     print(f"\n{'='*60}")
     print(f"  Analysis Engine Unit Tests")
@@ -166,8 +166,8 @@ async def main():
     print("  WORK HUNTER BOT - Pipeline Test")
     print("=" * 60)
 
-    await test_analysis_engine()
-    await test_scraper_pipeline()
+    await demo_analysis_engine()
+    await demo_scraper_pipeline()
 
     print(f"\n{'='*60}")
     print("  Tests complete!")

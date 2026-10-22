@@ -17,10 +17,12 @@ from backend.models.database import (
     Application,
     ApplicationStatusChange,
     Candidate,
+    CandidateJobScore,
     TelegramUser,
     User,
 )
 from backend.security import verify_password
+from backend.matching.scoring import rescore_candidate
 from backend.sources.urls import is_safe_fetch_url
 
 PROFILE_WAIT = 1
@@ -334,6 +336,9 @@ async def set_salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_db()
+    user = await _ensure_user(update)
+    if not user:
+        return
 
     if context.args:
         query = " ".join(context.args).lower()
@@ -345,27 +350,34 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with db.async_session_factory() as session:
-        result = await session.execute(
-            select(Job).where(
+        tg_user = (await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))).scalars().first()
+        candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+        query_stmt = select(Job, CandidateJobScore).outerjoin(
+            CandidateJobScore,
+            (CandidateJobScore.job_id == Job.id)
+            & (CandidateJobScore.candidate_id == candidate.id if candidate else False),
+        ).where(
                 Job.title.ilike(f"%{query}%")
                 | Job.company.ilike(f"%{query}%")
                 | Job.description.ilike(f"%{query}%")
-            ).order_by(Job.created_at.desc()).limit(10)
-        )
-        jobs = result.scalars().all()
+            )
+        query_stmt = query_stmt.order_by(
+            CandidateJobScore.score.desc().nullslast() if candidate else Job.created_at.desc()
+        ).limit(10)
+        jobs = (await session.execute(query_stmt)).all()
 
         if not jobs:
             await update.message.reply_text(f"No jobs found matching '{query}'", reply_markup=_main_menu_keyboard())
             return
 
         lines = [f"Results for '{query}':\n"]
-        for i, job in enumerate(jobs, 1):
+        for i, (job, score) in enumerate(jobs, 1):
             remote = " [Remote]" if job.remote else ""
             lines.append(
                 f"{i}. {job.title}{remote}\n"
                 f"   {job.company} | {job.location or 'N/A'}\n"
-                f"   Match: {job.match_score:.0%}\n"
-                f"   ID: {job.id[:8]}"
+                + (f"   Match: {score.score:.0%}\n" if score else "")
+                + f"   ID: {job.id[:8]}"
             )
 
         await update.message.reply_text("\n\n".join(lines) + "\n\nUse /apply <job_id> to track", reply_markup=_main_menu_keyboard())
@@ -374,23 +386,31 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def top_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show top matching jobs."""
     user = await _ensure_user(update)
+    if not user:
+        return
     db = get_db()
 
     async with db.async_session_factory() as session:
+        tg_user = (await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))).scalars().first()
+        candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+        if not candidate:
+            await update.message.reply_text("Link your web account and complete your profile to see personalized matches.")
+            return
         result = await session.execute(
-            select(Job)
-            .where(Job.status == "discovered")
-            .order_by(Job.match_score.desc())
+            select(Job, CandidateJobScore)
+            .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+            .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+            .order_by(CandidateJobScore.score.desc())
             .limit(5)
         )
-        jobs = result.scalars().all()
+        jobs = result.all()
 
         if not jobs:
             await update.message.reply_text("No jobs found yet. Run a scan first.")
             return
 
         lines = ["Top matching jobs:\n"]
-        for i, job in enumerate(jobs, 1):
+        for i, (job, score) in enumerate(jobs, 1):
             salary = ""
             if job.salary_min and job.salary_max:
                 salary = f" | {job.salary_min:,}-{job.salary_max:,} {job.salary_currency or 'KES'}"
@@ -401,7 +421,7 @@ async def top_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"{i}. {job.title}\n"
                 f"   {job.company}{remote}{salary}\n"
-                f"   Match: {job.match_score:.0%} | Risk: {job.risk_level or 'pending'}\n"
+                f"   Match: {score.score:.0%} | Risk: {job.risk_level or 'pending'}\n"
                 f"   ID: {job.id[:8]}"
             )
 
@@ -517,7 +537,12 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             job_id=job.id,
             status="shortlisted",
             applied_at=datetime.now(timezone.utc),
-            match_score=job.match_score,
+            match_score=(await session.execute(
+                select(CandidateJobScore.score).where(
+                    CandidateJobScore.candidate_id == candidate.id,
+                    CandidateJobScore.job_id == job.id,
+                )
+            )).scalar_one_or_none(),
             risk_score=job.risk_score,
         )
         session.add(app)
@@ -712,6 +737,7 @@ async def profile_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         candidate.preferred_locations_list = [loc.title() if loc != "any" else "Remote"]
                     except Exception:
                         pass
+                    await rescore_candidate(session, candidate)
                     await session.commit()
             else:
                 # Save to telegram user preferences as fallback
@@ -789,21 +815,25 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
             tg_user = tg_res.scalars().first()
             candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
-            q = select(Job).where(Job.status == "discovered").order_by(Job.match_score.desc())
-            result = await session.execute(q.offset((page-1)*5).limit(5))
-            jobs = result.scalars().all()
+            if candidate:
+                q = (select(Job, CandidateJobScore)
+                     .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+                     .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+                     .order_by(CandidateJobScore.score.desc()))
+                result = await session.execute(q.offset((page-1)*5).limit(5))
+                jobs = result.all()
+            else:
+                jobs = []
             if not jobs:
-                text = "Top Matches\n\nNothing strong right now."
+                text = "Top Matches\n\n" + ("Link your web account and complete your profile to see personalized matches." if not candidate else "Nothing strong right now.")
             else:
                 lines = [f"Top Matches (page {page}):\n"]
-                for i, job in enumerate(jobs, 1+(page-1)*5):
+                for i, (job, score) in enumerate(jobs, 1+(page-1)*5):
                     remote = " [Remote]" if job.remote else ""
                     url_status = job.url_status or "NEEDS_REVIEW"
                     warn = " ⚠️" if url_status != "VALID" else ""
-                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {job.match_score:.0%}\n   ID: {job.id[:8]}")
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {score.score:.0%}\n   ID: {job.id[:8]}")
                 text = "\n\n".join(lines)
-                if not candidate:
-                    text += "\n\nTip: Link your account and complete your profile for better matches."
         keyboard = []
         nav = []
         if page > 1:
@@ -865,22 +895,29 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 pass
             return
         async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if not candidate:
+                await query.edit_message_text("Link your web account and complete your profile to see personalized matches.")
+                return
             result = await session.execute(
-                select(Job)
-                .where(Job.status == "discovered")
-                .order_by(Job.match_score.desc())
+                select(Job, CandidateJobScore)
+                .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+                .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+                .order_by(CandidateJobScore.score.desc())
                 .limit(5)
             )
-            jobs = result.scalars().all()
+            jobs = result.all()
             if not jobs:
                 text = "Top Jobs\n\nNo jobs found yet."
             else:
                 lines = ["Top Jobs:\n"]
-                for i, job in enumerate(jobs, 1):
+                for i, (job, score) in enumerate(jobs, 1):
                     remote = " [Remote]" if job.remote else ""
                     url_status = job.url_status or "NEEDS_REVIEW"
                     warn = " ⚠️" if url_status != "VALID" else ""
-                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {job.match_score:.0%}\n   ID: {job.id[:8]}")
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {score.score:.0%}\n   ID: {job.id[:8]}")
                 text = "\n\n".join(lines) + "\n\nUse /apply <job_id> to track."
         keyboard = [
             [InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],

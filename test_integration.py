@@ -8,11 +8,10 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from backend.models.database import Database, Source, Job, Candidate, Application, ApplicationStatusChange, Base
+from backend.models.database import Database, Source, Job, Candidate, Application, ApplicationStatusChange, CandidateJobScore, Base
 from backend.services.normalizer import JobNormalizer
 from backend.risk.engine import RiskEngine
-from backend.matching.engine import MatchingEngine
-from backend.config import Settings
+from backend.matching.scoring import candidate_to_scoring_dict, score_job, store_score
 from backend.scrapers.greenhouse import GreenhouseScraper
 from backend.scrapers.ashby import AshbyScraper
 
@@ -23,9 +22,6 @@ DB_URL = "sqlite+aiosqlite:///./test_integration.db"
 
 
 async def main():
-    settings = Settings()
-    settings.database_url = DB_URL
-
     # Clean slate
     if os.path.exists("test_integration.db"):
         os.remove("test_integration.db")
@@ -46,7 +42,6 @@ async def main():
 
     normalizer = JobNormalizer()
     risk_engine = RiskEngine()
-    match_engine = MatchingEngine(settings)
 
     candidate_profile = {
         "skills": ["python", "django", "postgresql", "docker", "git", "react"],
@@ -88,7 +83,6 @@ async def main():
                         continue
 
                     risk = risk_engine.analyze(norm)
-                    result = await match_engine.match(norm, candidate_profile)
 
                     job = Job(
                         source_id=source.id,
@@ -111,8 +105,6 @@ async def main():
                         risk_score=risk["risk_score"],
                         risk_level=risk["risk_level"],
                         risk_flags=json.dumps(risk.get("risk_flags", [])),
-                        match_score=result.get("total_score", 0.0),
-                        match_breakdown=json.dumps(result.get("breakdown", {})),
                     )
                     session.add(job)
                     inserted += 1
@@ -136,15 +128,15 @@ async def main():
 
         top_jobs = (
             await session.execute(
-                select(Job.title, Job.company, Job.match_score, Job.risk_score, Job.risk_level)
-                .order_by(Job.match_score.desc())
+                select(Job.title, Job.company, Job.risk_score, Job.risk_level)
+                .order_by(Job.created_at.desc())
                 .limit(5)
             )
         ).all()
-        print(f"\n  Top 5 by match score:")
-        for i, (title, company, match, risk, risk_level) in enumerate(top_jobs):
+        print(f"\n  Latest 5 jobs:")
+        for i, (title, company, risk, risk_level) in enumerate(top_jobs):
             print(f"    [{i+1}] {title[:50]} @ {company}")
-            print(f"        Match: {match:.3f}  Risk: {risk:.1f}/100 ({risk_level})")
+            print(f"        Risk: {risk:.1f}/100 ({risk_level})")
 
     # ── Phase 3: Create candidate profile ──
     print("\n=== PHASE 3: CANDIDATE PROFILE ===")
@@ -168,6 +160,11 @@ async def main():
             remote_preference="full",
         )
         session.add(candidate)
+        await session.flush()
+        jobs = (await session.execute(select(Job))).scalars().all()
+        candidate_dict = candidate_to_scoring_dict(candidate)
+        for job in jobs:
+            store_score(session, candidate, job, score_job(job, candidate_dict))
         await session.commit()
         await session.refresh(candidate)
         print(f"  Created candidate: {candidate.name} (id={candidate.id[:8]}...)")
@@ -175,18 +172,26 @@ async def main():
     # ── Phase 4: Create application ──
     print("\n=== PHASE 4: APPLICATION TRACKING ===")
     async with db.async_session_factory() as session:
-        result = await session.execute(select(Job).order_by(Job.match_score.desc()).limit(1))
-        top_job = result.scalars().first()
-
         result = await session.execute(select(Candidate))
         cand = result.scalars().first()
+        top_job_result = await session.execute(
+            select(Job)
+            .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+            .where(CandidateJobScore.candidate_id == cand.id)
+            .order_by(CandidateJobScore.score.desc())
+            .limit(1)
+        )
+        top_job = top_job_result.scalars().first()
+        top_score = (await session.execute(select(CandidateJobScore.score).where(
+            CandidateJobScore.candidate_id == cand.id, CandidateJobScore.job_id == top_job.id,
+        ))).scalar_one()
 
         app = Application(
             candidate_id=cand.id,
             job_id=top_job.id,
             status="shortlisted",
             notes="High match score, applying",
-            match_score=top_job.match_score,
+            match_score=top_score,
             risk_score=top_job.risk_score,
         )
         session.add(app)
@@ -208,7 +213,7 @@ async def main():
     print("\n=== PHASE 5: ANALYTICS ===")
     async with db.async_session_factory() as session:
         total_jobs = (await session.execute(select(sa_func.count(Job.id)))).scalar()
-        avg_match = (await session.execute(select(sa_func.avg(Job.match_score)))).scalar()
+        avg_match = (await session.execute(select(sa_func.avg(CandidateJobScore.score)))).scalar()
         avg_risk = (await session.execute(select(sa_func.avg(Job.risk_score)))).scalar()
 
         source_rows = (
@@ -219,10 +224,11 @@ async def main():
             )
         ).all()
 
-        excellent = (await session.execute(select(sa_func.count(Job.id)).where(Job.match_score >= 0.8))).scalar()
-        good = (await session.execute(select(sa_func.count(Job.id)).where(Job.match_score >= 0.6, Job.match_score < 0.8))).scalar()
-        fair = (await session.execute(select(sa_func.count(Job.id)).where(Job.match_score >= 0.4, Job.match_score < 0.6))).scalar()
-        poor = (await session.execute(select(sa_func.count(Job.id)).where(Job.match_score < 0.4))).scalar()
+        candidate_id = (await session.execute(select(Candidate.id))).scalars().first()
+        excellent = (await session.execute(select(sa_func.count(CandidateJobScore.id)).where(CandidateJobScore.candidate_id == candidate_id, CandidateJobScore.score >= 0.8))).scalar()
+        good = (await session.execute(select(sa_func.count(CandidateJobScore.id)).where(CandidateJobScore.candidate_id == candidate_id, CandidateJobScore.score >= 0.6, CandidateJobScore.score < 0.8))).scalar()
+        fair = (await session.execute(select(sa_func.count(CandidateJobScore.id)).where(CandidateJobScore.candidate_id == candidate_id, CandidateJobScore.score >= 0.4, CandidateJobScore.score < 0.6))).scalar()
+        poor = (await session.execute(select(sa_func.count(CandidateJobScore.id)).where(CandidateJobScore.candidate_id == candidate_id, CandidateJobScore.score < 0.4))).scalar()
 
         print(f"  Total jobs: {total_jobs}")
         print(f"  Avg match: {avg_match:.3f}" if avg_match else "  Avg match: N/A")

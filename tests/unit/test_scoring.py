@@ -1,97 +1,129 @@
-"""Tests for candidate/job match scoring (backend.matching.scoring)."""
+"""Candidate-scoped match scoring regression tests."""
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
 
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import select
 
 from backend.matching.scoring import (
-    DEFAULT_USER_EMAIL,
+    apply_score,
     candidate_to_scoring_dict,
-    ensure_default_candidate,
     job_to_scoring_dict,
     load_candidate,
     score_job,
 )
-from backend.models.database import Candidate, Database, User
+from backend.models.database import Candidate, CandidateJobScore, Database, Job, Source, User
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-def test_default_candidate_created_and_idempotent(tmp_path):
-    db = Database(f"sqlite+aiosqlite:///{tmp_path/'c1.db'}")
+def _profile_score(job, skills, roles):
+    return score_job(job, {
+        "skills": skills,
+        "experience_level": "mid",
+        "preferred_roles": roles,
+        "location_preferences": {"cities": ["Remote"], "countries": [], "relocate": True, "remote": True},
+        "salary_preferences": {"min": None, "max": None},
+        "projects": [],
+    })
+
+
+def test_candidate_lookup_requires_explicit_user_id(tmp_path):
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'identity.db'}")
     _run(db.init_db())
 
     async def scenario():
         async with db.async_session_factory() as session:
-            first = await ensure_default_candidate(session)
+            owner = User(email="one@example.com", hashed_password="x")
+            other = User(email="two@example.com", hashed_password="x")
+            session.add_all([owner, other])
+            await session.flush()
+            profile = Candidate(user_id=owner.id, name="One", email="mutable-contact@example.com")
+            session.add(profile)
             await session.commit()
-            second = await ensure_default_candidate(session)
-            await session.commit()
-            users = (await session.execute(select(sa_func.count(User.id)))).scalar()
-            candidates = (await session.execute(select(sa_func.count(Candidate.id)))).scalar()
-            loaded = await load_candidate(session)
-            return first.id, second.id, users, candidates, loaded.id if loaded else None
+            loaded = await load_candidate(session, owner.id)
+            absent = await load_candidate(session, other.id)
+            return profile.id, loaded.id if loaded else None, absent
 
-    first_id, second_id, users, candidates, loaded_id = _run(scenario())
+    profile_id, loaded_id, absent = _run(scenario())
     _run(db.close())
-
-    assert first_id == second_id == loaded_id
-    assert users == 1
-    assert candidates == 1
+    assert loaded_id == profile_id
+    assert absent is None
 
 
-def test_candidate_to_scoring_dict_shape(tmp_path):
-    db = Database(f"sqlite+aiosqlite:///{tmp_path/'c2.db'}")
+def test_two_candidates_keep_independent_scores_for_same_job(tmp_path):
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'candidate_scores.db'}")
     _run(db.init_db())
 
     async def scenario():
         async with db.async_session_factory() as session:
-            candidate = await ensure_default_candidate(session)
+            one = User(email="one@example.com", hashed_password="x")
+            two = User(email="two@example.com", hashed_password="x")
+            source = Source(name="fixture", url="https://fixture.example")
+            session.add_all([one, two, source])
+            await session.flush()
+            candidate_one = Candidate(user_id=one.id, name="Python profile", email=one.email, skills='["python", "docker"]', preferred_roles='["backend engineer"]')
+            candidate_two = Candidate(user_id=two.id, name="Design profile", email=two.email, skills='["figma", "design"]', preferred_roles='["designer"]')
+            session.add_all([candidate_one, candidate_two])
+            job = Job(source_id=source.id, source_job_id="j1", title="Backend Engineer", company="Acme", skills='["python", "docker"]', experience_level="mid", location="Remote")
+            session.add(job)
+            await session.flush()
+
+            first = _profile_score(job, ["python", "docker"], ["backend engineer"])
+            second = _profile_score(job, ["figma", "design"], ["designer"])
+            await apply_score(session, candidate_one, job, first)
+            await apply_score(session, candidate_two, job, second)
             await session.commit()
-            return candidate_to_scoring_dict(candidate)
 
-    mapping = _run(scenario())
+            first_record = (await session.execute(select(CandidateJobScore).where(CandidateJobScore.candidate_id == candidate_one.id))).scalar_one()
+            second_record = (await session.execute(select(CandidateJobScore).where(CandidateJobScore.candidate_id == candidate_two.id))).scalar_one()
+            second_before = second_record.score
+
+            first["score"] = 0.11
+            first["breakdown"] = {"skills": 0.11}
+            await apply_score(session, candidate_one, job, first)
+            await session.commit()
+            await session.refresh(second_record)
+            return (first_record.score, first_record.breakdown, second_before, second_record.score,
+                    job.match_score, job.match_breakdown_dict)
+
+    first_score, first_breakdown, second_before, second_after, legacy_score, legacy_breakdown = _run(scenario())
     _run(db.close())
+    assert first_score == 0.11
+    assert first_breakdown == '{"skills": 0.11}'
+    assert second_before != first_score
+    assert second_after == second_before
+    assert legacy_score == 0.0
+    assert legacy_breakdown == {}
 
-    assert mapping["skills"]
-    assert mapping["preferred_roles"]
+
+def test_candidate_to_scoring_dict_shape():
+    candidate = Candidate(
+        id="c1", user_id="u1", name="Candidate", email="candidate@example.com",
+        skills='["python"]', preferred_roles='["backend engineer"]',
+        preferred_locations='["Remote"]', remote_preference="full",
+    )
+    mapping = candidate_to_scoring_dict(candidate)
+    assert mapping["skills"] == ["python"]
+    assert mapping["preferred_roles"] == ["backend engineer"]
     assert mapping["location_preferences"]["remote"] is True
     assert isinstance(mapping["projects"], list)
 
 
 def test_score_job_produces_breakdown():
     job = SimpleNamespace(
-        id="j1",
-        skills_list=["python", "docker"],
-        experience_level="mid",
-        title="Backend Engineer",
-        location="Remote",
-        salary_min=None,
-        salary_max=None,
-        salary_currency=None,
-        posted_at=None,
+        id="j1", skills_list=["python", "docker"], experience_level="mid",
+        title="Backend Engineer", location="Remote", salary_min=None,
+        salary_max=None, salary_currency=None, posted_at=None,
     )
-    candidate = {
-        "skills": ["python", "docker"],
-        "experience_level": "mid",
-        "preferred_roles": ["backend engineer"],
-        "location_preferences": {"cities": ["Remote"], "countries": [], "relocate": True, "remote": True},
-        "salary_preferences": {"min": None, "max": None},
-        "projects": [],
-    }
-
-    result = score_job(job, candidate)
-
+    result = _profile_score(job, ["python", "docker"], ["backend engineer"])
     assert 0.0 <= result["score"] <= 1.0
     assert result["score"] > 0.0
-    assert {"skills", "experience", "role", "location", "salary",
-            "freshness", "source_quality"} <= set(result["breakdown"])
-    # exact skill overlap should score well above the 0.5 neutral baseline
+    assert {"skills", "experience", "role", "location", "salary", "freshness", "source_quality"} <= set(result["breakdown"])
     assert result["breakdown"]["skills"] > 0.5
 
 
@@ -99,14 +131,8 @@ def test_job_to_scoring_dict_serializes_posted_at():
     from datetime import datetime, timezone
 
     job = SimpleNamespace(
-        id="j2",
-        skills_list=[],
-        experience_level=None,
-        title="Analyst",
-        location="Nairobi",
-        salary_min=1000,
-        salary_max=2000,
-        salary_currency="USD",
+        id="j2", skills_list=[], experience_level=None, title="Analyst", location="Nairobi",
+        salary_min=1000, salary_max=2000, salary_currency="USD",
         posted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     mapping = job_to_scoring_dict(job)

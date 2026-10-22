@@ -28,12 +28,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.matching.scoring import (
-    apply_score,
     candidate_to_scoring_dict,
-    load_candidate,
     score_job,
+    store_score,
 )
-from backend.models.database import IngestionError, Job, Source
+from backend.models.database import Candidate, CandidateJobScore, IngestionError, Job, Source
 from backend.scrapers.adapter import JobSourceAdapter, ListingItem
 from backend.services.normalizer import JobNormalizer
 from backend.sources.models import SourceConfig, UrlStatus, utcnow
@@ -109,9 +108,9 @@ class IngestionEngine:
         self._normalizer = normalizer or JobNormalizer()
         self.max_jobs_per_source = max_jobs_per_source
         self.dry_run = dry_run
-        # matching candidate is resolved once per engine and cached
-        self._candidate_dict: dict[str, Any] | None = None
-        self._candidate_loaded = False
+        # Candidate profiles are resolved once per engine. Scores are stored
+        # per candidate; ingestion never writes personalized data to Job.
+        self._candidates: list[tuple[Candidate, dict[str, Any]]] | None = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -125,6 +124,7 @@ class IngestionEngine:
         limit: int | None = None,
         on_job: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> SourceRunResult:
+        self._candidates = None
         started = utcnow()
         limit = limit or self.max_jobs_per_source
         result = SourceRunResult(source=name, started_at=started.isoformat())
@@ -584,6 +584,7 @@ class IngestionEngine:
                 out.errors += 1
                 return out
             await self._merge_provenance(session, row, source_row.name, source_url)
+            await self._apply_match(session, row)
             if normalized.get("_final_url") and not row.final_url:
                 row.final_url = normalized["_final_url"]
             out.dup += 1
@@ -593,22 +594,40 @@ class IngestionEngine:
         out.new += 1
         return out
 
-    async def _candidate_for_matching(self, session: AsyncSession) -> dict[str, Any] | None:
-        """Resolve (and cache) the candidate profile used for match scoring."""
-        if not self._candidate_loaded:
-            candidate = await load_candidate(session)
-            self._candidate_dict = (
-                candidate_to_scoring_dict(candidate) if candidate is not None else None
-            )
-            self._candidate_loaded = True
-        return self._candidate_dict
+    async def _candidates_for_matching(
+        self, session: AsyncSession
+    ) -> list[tuple[Candidate, dict[str, Any]]]:
+        if self._candidates is None:
+            candidates = (await session.execute(select(Candidate))).scalars().all()
+            self._candidates = [
+                (candidate, candidate_to_scoring_dict(candidate))
+                for candidate in candidates
+            ]
+        return self._candidates
 
     async def _apply_match(self, session: AsyncSession, job: Job) -> None:
-        """Score ``job`` against the stored candidate, if one exists."""
-        candidate = await self._candidate_for_matching(session)
-        if candidate is None:
+        """Persist one independent score per current candidate profile."""
+        candidates = await self._candidates_for_matching(session)
+        if not candidates:
             return
-        apply_score(job, score_job(job, candidate))
+        ids = [candidate.id for candidate, _ in candidates]
+        existing = {
+            record.candidate_id: record
+            for record in (await session.execute(
+                select(CandidateJobScore).where(
+                    CandidateJobScore.job_id == job.id,
+                    CandidateJobScore.candidate_id.in_(ids),
+                )
+            )).scalars().all()
+        }
+        for candidate, candidate_dict in candidates:
+            store_score(
+                session,
+                candidate,
+                job,
+                score_job(job, candidate_dict),
+                existing.get(candidate.id),
+            )
 
     async def _merge_provenance(self, session: AsyncSession, job: Job, source_name: str, url: str) -> None:
         sources = job.provenances_list

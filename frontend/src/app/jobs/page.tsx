@@ -29,10 +29,18 @@ export default function JobsPage() {
   const pageSize = 20
 
   useEffect(() => {
+    const query = new URLSearchParams(window.location.search).get("q")
+    if (query) setSearch(query)
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    jobsService
-      .list({ page: String(page), page_size: String(pageSize) })
+    const timer = window.setTimeout(() => {
+      setLoading(true)
+      const request = search.trim()
+        ? jobsService.search(search.trim(), page, pageSize)
+        : jobsService.list({ page: String(page), page_size: String(pageSize) })
+      request
       .then(res => {
         if (cancelled) return
         setJobs(res.jobs as Job[])
@@ -46,22 +54,14 @@ export default function JobsPage() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
-    return () => { cancelled = true }
-  }, [page])
+    }, search.trim() ? 250 : 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [page, search])
 
   const sourceOptions = ["All", ...Array.from(new Set(jobs.map(j => j.source).filter(Boolean))).sort()]
   const filters = baseFilters.map(f => (f.label === "Source" ? { ...f, options: sourceOptions } : f))
 
   let filtered = [...jobs]
-
-  if (search) {
-    const q = search.toLowerCase()
-    filtered = filtered.filter(j =>
-      j.title.toLowerCase().includes(q) ||
-      j.company.toLowerCase().includes(q) ||
-      j.skills.some(s => s.toLowerCase().includes(q))
-    )
-  }
 
   if (activeFilters.Source && activeFilters.Source !== "All") {
     filtered = filtered.filter(j => j.source.toLowerCase() === activeFilters.Source.toLowerCase())
@@ -91,8 +91,8 @@ export default function JobsPage() {
             <div className="flex-1 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-2">
               <Search className="w-4 h-4 text-text-muted shrink-0" />
               <input
-                type="text" value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Search by title, company, or skill..."
+                type="text" value={search} onChange={e => { setSearch(e.target.value); setPage(1) }}
+                placeholder="Search jobs by title, company, or description..."
                 className="bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none w-full"
               />
               {search && (

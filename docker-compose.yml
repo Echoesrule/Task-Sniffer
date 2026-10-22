@@ -4,9 +4,9 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: work_bot_hunter
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-work_bot_hunter}
     ports:
       - "5432:5432"
     volumes:
@@ -31,12 +31,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: uvicorn backend.api.app:app --host 0.0.0.0 --port 8000 --reload
+    command: /bin/sh -c "alembic upgrade head && uvicorn backend.api.app:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/work_bot_hunter
-      DATABASE_URL_SYNC: postgresql://postgres:postgres@db:5432/work_bot_hunter
+      APP_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend:/app/backend
@@ -53,8 +56,11 @@ services:
       dockerfile: Dockerfile
     command: celery -A backend.workers.celery_app worker -l info -c 2
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/work_bot_hunter
-      DATABASE_URL_SYNC: postgresql://postgres:postgres@db:5432/work_bot_hunter
+      APP_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend:/app/backend
@@ -71,8 +77,11 @@ services:
       dockerfile: Dockerfile
     command: celery -A backend.workers.celery_app beat -l info
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/work_bot_hunter
-      DATABASE_URL_SYNC: postgresql://postgres:postgres@db:5432/work_bot_hunter
+      APP_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./backend:/app/backend

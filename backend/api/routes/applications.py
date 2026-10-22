@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.api.deps import get_current_user, get_db
 from backend.api.schemas import (
@@ -24,6 +25,8 @@ def _app_to_response(a: Application) -> ApplicationResponse:
     return ApplicationResponse(
         id=a.id,
         job_id=a.job_id,
+        job_title=a.job.title if a.job else "",
+        company=a.job.company if a.job else "",
         status=a.status,
         notes=a.notes or "",
         match_score=a.match_score,
@@ -38,7 +41,8 @@ async def get_application_stats(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> ApplicationStatsResponse:
-    result = await db.execute(select(Application))
+    candidate_ids = select(Candidate.id).where(Candidate.user_id == _user["user_id"])
+    result = await db.execute(select(Application).where(Application.candidate_id.in_(candidate_ids)))
     apps = result.scalars().all()
 
     total = len(apps)
@@ -68,7 +72,10 @@ async def list_applications(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> list[ApplicationResponse]:
-    query = select(Application)
+    candidate_ids = select(Candidate.id).where(Candidate.user_id == _user["user_id"])
+    query = select(Application).options(selectinload(Application.job)).where(
+        Application.candidate_id.in_(candidate_ids)
+    )
     if status:
         query = query.where(Application.status == status)
     offset = (page - 1) * page_size
@@ -88,7 +95,7 @@ async def create_application(
         raise HTTPException(status_code=404, detail=f"Job {application.job_id} not found")
 
     user_result = await db.execute(
-        select(Candidate).where(Candidate.email == _user["email"])
+        select(Candidate).where(Candidate.user_id == _user["user_id"])
     )
     candidate = user_result.scalars().first()
     if not candidate:
@@ -106,6 +113,7 @@ async def create_application(
     app = Application(
         candidate_id=candidate.id,
         job_id=application.job_id,
+        job=job,
         status="shortlisted",
         notes=application.notes,
         match_score=application.match_score,
@@ -126,6 +134,27 @@ async def create_application(
     return _app_to_response(app)
 
 
+@router.get("/{application_id}", response_model=ApplicationResponse)
+async def get_application(
+    application_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> ApplicationResponse:
+    result = await db.execute(
+        select(Application)
+        .options(selectinload(Application.job))
+        .join(Candidate, Application.candidate_id == Candidate.id)
+        .where(
+            Application.id == application_id,
+            Candidate.user_id == _user["user_id"],
+        )
+    )
+    app = result.scalars().first()
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return _app_to_response(app)
+
+
 @router.patch("/{application_id}", response_model=ApplicationResponse)
 async def update_application(
     application_id: str,
@@ -133,7 +162,15 @@ async def update_application(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> ApplicationResponse:
-    result = await db.execute(select(Application).where(Application.id == application_id))
+    result = await db.execute(
+        select(Application)
+        .options(selectinload(Application.job))
+        .join(Candidate, Application.candidate_id == Candidate.id)
+        .where(
+            Application.id == application_id,
+            Candidate.user_id == _user["user_id"],
+        )
+    )
     app = result.scalars().first()
     if not app:
         raise HTTPException(status_code=404, detail=f"Application {application_id} not found")

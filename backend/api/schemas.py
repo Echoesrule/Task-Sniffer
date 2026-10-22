@@ -114,7 +114,7 @@ class JobResponse(BaseModel):
     experience: str = Field("", description="Experience requirement")
     posted_at: datetime | None = Field(None, description="When the job was posted")
     fetched_at: datetime | None = Field(None, description="When the job was fetched")
-    match_score: float = Field(0.0, ge=0.0, le=1.0, description="Match score 0-1")
+    match_score: float | None = Field(None, ge=0.0, le=1.0, description="Candidate-specific match score 0-1; null until scored")
     match_breakdown: dict[str, float] = Field(default_factory=dict, description="Match score breakdown by component")
     classification: str | None = Field(None, description="Match classification (EXCELLENT/STRONG/POSSIBLE/WEAK/IGNORE)")
     risk_score: float = Field(0.0, ge=0.0, le=100.0, description="Risk score 0-100")
@@ -154,7 +154,8 @@ class JobStatsResponse(BaseModel):
     by_country: dict[str, int] = Field(default_factory=dict, description="Job count by country")
     by_remote: dict[str, int] = Field(default_factory=dict, description="Remote vs on-site counts")
     avg_risk_score: float = Field(0.0, description="Average risk score across jobs")
-    avg_match_score: float = Field(0.0, description="Average match score across jobs")
+    avg_match_score: float | None = Field(None, description="Average match score for the authenticated candidate")
+    strong_matches: int = Field(0, description="Jobs with match score at least 0.75")
     latest_created_at: datetime | None = Field(None, description="Most recent job creation timestamp")
 
 
@@ -213,7 +214,7 @@ class ApplicationCreate(BaseModel):
     job_id: str = Field(..., description="Job identifier to apply for")
     notes: str = Field("", description="Optional notes about the application")
     match_score: float | None = Field(None, ge=0.0, le=1.0, description="Pre-computed match score")
-    risk_score: float | None = Field(None, ge=0.0, le=1.0, description="Pre-computed risk score")
+    risk_score: float | None = Field(None, ge=0.0, le=100.0, description="Pre-computed risk score (0-100)")
 
 
 class ApplicationUpdate(BaseModel):
@@ -228,6 +229,8 @@ class ApplicationResponse(BaseModel):
 
     id: str = Field(..., description="Application identifier")
     job_id: str = Field(..., description="Associated job identifier")
+    job_title: str = Field("", description="Associated job title")
+    company: str = Field("", description="Associated company")
     status: str = Field("shortlisted", description="Current application status")
     notes: str = Field("", description="Application notes")
     match_score: float | None = Field(None, description="Match score at time of application")
@@ -241,7 +244,7 @@ class ApplicationStatsResponse(BaseModel):
 
     total: int = Field(0, description="Total applications")
     by_status: dict[str, int] = Field(default_factory=dict, description="Count by status")
-    avg_match_score: float = Field(0.0, description="Average match score")
+    avg_match_score: float | None = Field(None, description="Average match score for the authenticated candidate")
     avg_risk_score: float = Field(0.0, description="Average risk score")
     acceptance_rate: float = Field(0.0, description="Percentage of accepted offers")
 
@@ -256,7 +259,7 @@ class SourceStats(BaseModel):
 
     source: str = Field(..., description="Source platform name")
     total_jobs: int = Field(0, description="Jobs from this source")
-    avg_match_score: float = Field(0.0, description="Average match score")
+    avg_match_score: float | None = Field(None, description="Average match score for the authenticated candidate")
     avg_risk_score: float = Field(0.0, description="Average risk score")
     application_count: int = Field(0, description="Applications made to this source")
     success_rate: float = Field(0.0, description="Success rate for this source")
@@ -269,8 +272,8 @@ class MatchDistribution(BaseModel):
     good: int = Field(0, description="Jobs with match score 0.6-0.8")
     fair: int = Field(0, description="Jobs with match score 0.4-0.6")
     poor: int = Field(0, description="Jobs with match score < 0.4")
-    avg_score: float = Field(0.0, description="Mean match score")
-    median_score: float = Field(0.0, description="Median match score")
+    avg_score: float | None = Field(None, description="Mean candidate-specific match score")
+    median_score: float | None = Field(None, description="Median candidate-specific match score")
 
 
 class ApplicationFunnel(BaseModel):
@@ -300,7 +303,7 @@ class AnalyticsOverview(BaseModel):
     total_applications: int = Field(0, description="Total applications made")
     total_shortlisted: int = Field(0, description="Total shortlisted jobs")
     total_rejected: int = Field(0, description="Total rejected applications")
-    avg_match_score: float = Field(0.0, description="Average match score")
+    avg_match_score: float | None = Field(None, description="Average match score for the authenticated candidate")
     avg_risk_score: float = Field(0.0, description="Average risk score")
     top_sources: list[SourceStats] = Field(default_factory=list, description="Top performing sources")
     recent_activity: list[ActivityItem] = Field(default_factory=list, description="Recent activity events")

@@ -9,6 +9,9 @@ import {
   Radar
 } from "lucide-react"
 import { useState } from "react"
+import { useEffect } from "react"
+import { useRouter } from "next/navigation"
+import { authService, getAuthToken } from "@/services/api"
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -21,7 +24,10 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname()
+  const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
+  const [signedIn, setSignedIn] = useState(false)
+  useEffect(() => { setSignedIn(Boolean(getAuthToken())) }, [])
 
   return (
     <aside className={cn(
@@ -60,6 +66,12 @@ export function Sidebar() {
 
       <div className="border-t border-border p-3">
         <HunterStatus collapsed={collapsed} />
+        {!collapsed && <button onClick={() => {
+          if (signedIn) { authService.logout(); setSignedIn(false); router.push("/login") }
+          else router.push("/login")
+        }} className="mt-3 w-full text-left text-xs text-text-secondary hover:text-text-primary px-2">
+          {signedIn ? "Sign out" : "Sign in"}
+        </button>}
       </div>
 
       <button
@@ -81,9 +93,8 @@ function HunterStatus({ collapsed }: { collapsed: boolean }) {
         </div>
         {!collapsed && (
           <div>
-            <p className="text-xs font-semibold text-green uppercase tracking-wider">Hunting</p>
-            <p className="text-[11px] text-text-muted mt-1">247 scanned · 12 matches</p>
-            <p className="text-[11px] text-text-muted">Last scan: 2m ago</p>
+            <p className="text-xs font-semibold text-green uppercase tracking-wider">Job discovery</p>
+            <p className="text-[11px] text-text-muted mt-1">Job scans depend on the backend scheduler</p>
           </div>
         )}
       </div>

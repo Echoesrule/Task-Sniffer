@@ -13,7 +13,7 @@ from backend.api.schemas import (
     MatchDistribution,
     SourceStats,
 )
-from backend.models.database import Application, Job, Source
+from backend.models.database import Application, Candidate, CandidateJobScore, Job, Source
 
 router = APIRouter()
 
@@ -23,17 +23,26 @@ async def get_overview(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> AnalyticsOverview:
+    candidate_ids = select(Candidate.id).where(Candidate.user_id == _user["user_id"])
     total_jobs = (await db.execute(select(sa_func.count(Job.id)))).scalar() or 0
-    total_apps = (await db.execute(select(sa_func.count(Application.id)))).scalar() or 0
+    user_applications = Application.candidate_id.in_(candidate_ids)
+    total_apps = (await db.execute(
+        select(sa_func.count(Application.id)).where(user_applications)
+    )).scalar() or 0
 
     shortlisted = (await db.execute(
-        select(sa_func.count(Application.id)).where(Application.status == "shortlisted")
+        select(sa_func.count(Application.id)).where(user_applications, Application.status == "shortlisted")
     )).scalar() or 0
     rejected = (await db.execute(
-        select(sa_func.count(Application.id)).where(Application.status == "rejected")
+        select(sa_func.count(Application.id)).where(user_applications, Application.status == "rejected")
     )).scalar() or 0
 
-    avg_match = (await db.execute(select(sa_func.avg(Job.match_score)))).scalar() or 0.0
+    candidate_id = (await db.execute(
+        select(Candidate.id).where(Candidate.user_id == _user["user_id"]).limit(1)
+    )).scalar_one_or_none()
+    avg_match = (await db.execute(
+        select(sa_func.avg(CandidateJobScore.score)).where(CandidateJobScore.candidate_id == candidate_id)
+    )).scalar() if candidate_id else None
     avg_risk = (await db.execute(select(sa_func.avg(Job.risk_score)))).scalar() or 0.0
 
     source_rows = (
@@ -56,7 +65,7 @@ async def get_overview(
         total_applications=total_apps,
         total_shortlisted=shortlisted,
         total_rejected=rejected,
-        avg_match_score=round(float(avg_match), 3),
+        avg_match_score=round(float(avg_match), 3) if avg_match is not None else None,
         avg_risk_score=round(float(avg_risk), 2),
         top_sources=top_sources,
         recent_activity=[],
@@ -68,29 +77,38 @@ async def get_source_stats(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> list[SourceStats]:
-    rows = (
+    candidate_id = (await db.execute(
+        select(Candidate.id).where(Candidate.user_id == _user["user_id"]).limit(1)
+    )).scalar_one_or_none()
+    job_rows = (
         await db.execute(
-            select(
-                Source.name,
-                Source.jobs_found,
-                Source.unique_jobs,
-                Source.duplicate_rate,
-                Source.average_match_score,
-                Source.risk_rate,
-                Source.applications,
-            )
+            select(Source.name, sa_func.count(Job.id), sa_func.avg(CandidateJobScore.score), sa_func.avg(Job.risk_score))
+            .outerjoin(Job, Job.source_id == Source.id)
+            .outerjoin(CandidateJobScore, (CandidateJobScore.job_id == Job.id) & (CandidateJobScore.candidate_id == candidate_id))
+            .group_by(Source.name)
         )
     ).all()
+    candidate_ids = select(Candidate.id).where(Candidate.user_id == _user["user_id"])
+    app_rows = (
+        await db.execute(
+            select(Source.name, sa_func.count(Application.id))
+            .join(Job, Job.source_id == Source.id)
+            .join(Application, Application.job_id == Job.id)
+            .where(Application.candidate_id.in_(candidate_ids))
+            .group_by(Source.name)
+        )
+    ).all()
+    app_counts = dict(app_rows)
 
     return [
         SourceStats(
             source=r.name,
-            total_jobs=r.jobs_found,
-            avg_match_score=r.average_match_score,
-            avg_risk_score=r.risk_rate,
-            application_count=r.applications,
+            total_jobs=r[1],
+            avg_match_score=float(r[2]) if r[2] is not None else None,
+            avg_risk_score=float(r[3] or 0),
+            application_count=app_counts.get(r[0], 0),
         )
-        for r in rows
+        for r in job_rows
     ]
 
 
@@ -99,7 +117,14 @@ async def get_match_distribution(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> MatchDistribution:
-    result = await db.execute(select(Job.match_score))
+    candidate_id = (await db.execute(
+        select(Candidate.id).where(Candidate.user_id == _user["user_id"]).limit(1)
+    )).scalar_one_or_none()
+    if not candidate_id:
+        return MatchDistribution()
+    result = await db.execute(
+        select(CandidateJobScore.score).where(CandidateJobScore.candidate_id == candidate_id)
+    )
     scores = [row[0] for row in result.all() if row[0] is not None]
 
     if not scores:
@@ -129,9 +154,11 @@ async def get_application_funnel(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> ApplicationFunnel:
+    candidate_ids = select(Candidate.id).where(Candidate.user_id == _user["user_id"])
     rows = (
         await db.execute(
             select(Application.status, sa_func.count(Application.id))
+            .where(Application.candidate_id.in_(candidate_ids))
             .group_by(Application.status)
         )
     ).all()

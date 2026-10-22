@@ -1,18 +1,14 @@
 "use client"
 
-import { Bell, Search, Menu, X, Briefcase, Target, AlertTriangle, Check } from "lucide-react"
+import { Bell, Search, X, CircleUserRound } from "lucide-react"
 import { useState, useRef, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-
-const mockNotifications = [
-  { id: 1, type: "match", title: "New high-match job", message: "Python Backend Engineer at Safaricom — 92% match", time: "2m ago" },
-  { id: 2, type: "status", title: "Application update", message: "Andela screening — moved to interview", time: "15m ago" },
-  { id: 3, type: "risk", title: "Risk alert", message: "Job at 'Quick Cash Ltd' flagged — 72% risk", time: "1h ago" },
-  { id: 4, type: "match", title: "New high-match job", message: "Full Stack Dev at Cellulant — 85% match", time: "3h ago" },
-]
+import { useRouter } from "next/navigation"
 
 export function Header({ title }: { title: string }) {
   const [showNotifs, setShowNotifs] = useState(false)
+  const [query, setQuery] = useState("")
+  const router = useRouter()
   const notifRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -25,8 +21,11 @@ export function Header({ title }: { title: string }) {
     return () => document.removeEventListener("mousedown", handler)
   }, [])
 
-  const iconMap = { match: Target, status: Check, risk: AlertTriangle }
-  const colorMap = { match: "text-green", status: "text-blue", risk: "text-red" }
+  const submitSearch = (e: React.FormEvent) => {
+    e.preventDefault()
+    const value = query.trim()
+    if (value) router.push(`/jobs?q=${encodeURIComponent(value)}`)
+  }
 
   return (
     <header className="h-14 border-b border-border bg-surface/80 backdrop-blur-sm flex items-center justify-between px-6 sticky top-0 z-30">
@@ -35,15 +34,16 @@ export function Header({ title }: { title: string }) {
       </div>
 
       <div className="flex items-center gap-3">
-        <div className="hidden md:flex items-center gap-2 bg-surface-2 border border-border rounded-lg px-3 py-1.5 w-64">
+        <form onSubmit={submitSearch} className="hidden md:flex items-center gap-2 bg-surface-2 border border-border rounded-lg px-3 py-1.5 w-64">
           <Search className="w-4 h-4 text-text-muted" />
           <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
             type="text"
-            placeholder="Search jobs, skills, companies..."
+            placeholder="Search jobs, companies, descriptions..."
             className="bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none w-full"
           />
-          <kbd className="text-[10px] text-text-muted bg-surface-3 px-1.5 py-0.5 rounded border border-border">⌘K</kbd>
-        </div>
+        </form>
 
         <div className="relative" ref={notifRef}>
           <button
@@ -51,7 +51,6 @@ export function Header({ title }: { title: string }) {
             className="relative p-2 rounded-lg hover:bg-surface-2 transition-colors"
           >
             <Bell className="w-4.5 h-4.5 text-text-secondary" />
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-accent" />
           </button>
 
           <AnimatePresence>
@@ -69,32 +68,14 @@ export function Header({ title }: { title: string }) {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="max-h-80 overflow-y-auto">
-                  {mockNotifications.map(n => {
-                    const Icon = iconMap[n.type as keyof typeof iconMap]
-                    const color = colorMap[n.type as keyof typeof colorMap]
-                    return (
-                      <div key={n.id} className="flex items-start gap-3 px-4 py-3 hover:bg-surface-2 transition-colors cursor-pointer border-b border-border last:border-0">
-                        <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${color}`} />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-text-primary">{n.title}</p>
-                          <p className="text-xs text-text-secondary mt-0.5 truncate">{n.message}</p>
-                          <p className="text-[10px] text-text-muted mt-1">{n.time}</p>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-                <div className="px-4 py-2 border-t border-border">
-                  <button className="text-xs text-accent hover:text-accent-hover w-full text-center">View all notifications</button>
-                </div>
+                <p className="px-4 py-8 text-center text-xs text-text-muted">Notifications are not available yet.</p>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
         <div className="w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center">
-          <span className="text-xs font-medium text-accent">R</span>
+          <CircleUserRound className="w-4 h-4 text-accent" />
         </div>
       </div>
     </header>
