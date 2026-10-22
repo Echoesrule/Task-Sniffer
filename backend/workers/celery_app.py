@@ -29,14 +29,6 @@ celery_app.conf.beat_schedule = {
         "task": "backend.workers.tasks.scrape_all_sources",
         "schedule": crontab(minute=0, hour="*/1"),
     },
-    "analyze-new-jobs": {
-        "task": "backend.workers.tasks.analyze_new_jobs",
-        "schedule": crontab(minute=15, hour="*/1"),
-    },
-    "update-source-stats": {
-        "task": "backend.workers.tasks.update_source_stats",
-        "schedule": crontab(minute=0, hour="*/6"),
-    },
 }
 
 celery_app.autodiscover_tasks(["backend.workers"])

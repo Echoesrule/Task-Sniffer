@@ -51,9 +51,43 @@ Dashboard: http://localhost:3000
 
 ```bash
 cp .env.example .env
-# Edit .env with PostgreSQL URLs
+# For Docker Compose, set POSTGRES_PASSWORD, SECRET_KEY and ENCRYPTION_KEY, then set
+# DATABASE_URL / DATABASE_URL_SYNC to PostgreSQL URLs using host `db`.
 docker compose up -d
 ```
+
+The Compose stack refuses to start without database credentials, a JWT signing
+key and the CV encryption key. Generate `SECRET_KEY` with
+`python -c 'import secrets; print(secrets.token_urlsafe(48))'`. Generate
+`ENCRYPTION_KEY` with
+`python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'`.
+Keep both values in a deployment secret manager and retain the CV key backups
+separately; losing the CV key makes encrypted documents unrecoverable.
+
+New CV uploads are encrypted with AES-256-GCM before they are written to the
+persistent `cv_data` volume. Before upgrading an installation with existing CVs,
+provision `ENCRYPTION_KEY`, stop uploads, run
+`python scripts/encrypt_legacy_cvs.py --dry-run`, review the count, then run
+`python scripts/encrypt_legacy_cvs.py`. The script writes and verifies encrypted
+replacements before updating candidate paths and retains the plaintext originals
+under their old filenames. Verify authorized downloads and encrypted backups
+before securely removing those plaintext originals. Back up both the database
+and CV volume before conversion; rollback is restoring that paired snapshot so
+the old database paths still point to their original plaintext files. Legacy
+files are not served as plaintext by the new endpoint; they return HTTP 409
+until migrated.
+
+Match scores are stored per candidate in `candidate_job_scores`. Existing
+`jobs.match_score` and `jobs.match_breakdown` columns remain for compatibility,
+but historical values are not returned as personalized scores. Existing
+candidate profiles can be backfilled one at a time with
+`python scripts/score_jobs.py --candidate-id <candidate-id>`; use `--only-empty`
+to preserve already calculated candidate/job rows. New profile saves rescore
+that profile, and ingestion calculates independent scores for current profiles.
+The local development configuration generates an ephemeral signing key when
+`SECRET_KEY` is empty, so development tokens expire when the server restarts.
+Docker Compose runs the Alembic revisions before starting the API. Local SQLite
+startup retains the existing `create_all` plus additive migration behavior.
 
 ## Architecture
 
@@ -158,7 +192,15 @@ The bot runs automatically with the API server. No separate process needed.
 The bot scans every 5 minutes for new jobs matching each user's preferences:
 - Jobs scoring **≥60% match** with **<40% risk** are pushed automatically
 - Filtered by user's keywords, exclusions, and salary threshold
+- Requires the Telegram profile to be linked to a web candidate; ranking uses that candidate's scores
 - No manual intervention needed — just `/start` and set your preferences
+
+Each user/job alert has a durable delivery record, bounded retries and an
+expiring send claim so concurrent workers do not normally send the same alert.
+Delivery is at least once: if Telegram accepts a message but the process dies
+before recording success, retrying the expired claim can still send a duplicate.
+Ambiguous outcomes are delayed and logged; exactly-once delivery is not
+available through Telegram's send operation and the local database alone.
 
 ## Frontend Pages
 
@@ -169,7 +211,7 @@ The bot scans every 5 minutes for new jobs matching each user's preferences:
 | `/jobs/[id]` | Detail | Match breakdown, risk analysis, skills |
 | `/applications` | Tracker | Kanban board with 6 status columns |
 | `/analytics` | Analytics | Funnel, charts, source performance |
-| `/cv` | CV Manager | Upload, versions, security |
+| `/cv` | CV Manager | Upload, download and delete encrypted CV files |
 | `/settings` | Settings | Profile, hunter config, privacy |
 
 ## Configuration
@@ -189,6 +231,10 @@ All config via environment variables. See `.env.example`.
 | `WEIGHT_EXPERIENCE` | `0.20` | Experience match weight |
 | `RISK_BLOCK` | `70` | Risk score to block |
 | `RISK_REVIEW` | `40` | Risk score to flag |
+
+CV uploads are stored as files under `CV_STORAGE_PATH`. The application does
+not encrypt those files itself; configure encrypted storage at the host or
+volume layer if that is required by the deployment.
 
 ## Running Tests
 

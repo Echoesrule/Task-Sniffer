@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, func as sa_func
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, ConversationHandler
 
 from backend.config import get_settings
 from backend.models.database import (
@@ -16,8 +16,16 @@ from backend.models.database import (
     Source,
     Application,
     ApplicationStatusChange,
+    Candidate,
+    CandidateJobScore,
     TelegramUser,
+    User,
 )
+from backend.security import verify_password
+from backend.matching.scoring import rescore_candidate
+from backend.sources.urls import is_safe_fetch_url
+
+PROFILE_WAIT = 1
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +61,40 @@ async def _ensure_user(update: Update) -> TelegramUser | None:
     return user
 
 
+async def _get_linked_candidate(user: TelegramUser, session):
+    """Return the linked Candidate if the TelegramUser is linked and exists."""
+    if not user.candidate_id:
+        return None
+    result = await session.execute(select(Candidate).where(Candidate.id == user.candidate_id))
+    return result.scalars().first()
+
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("🎯 Top Matches", callback_data="jobs:rec:1")],
+        [InlineKeyboardButton("🔎 Search Jobs", callback_data="menu:search")],
+        [InlineKeyboardButton("📋 All Jobs", callback_data="jobs:all:1")],
+        [InlineKeyboardButton("🗂 My Applications", callback_data="menu:apps")],
+        [InlineKeyboardButton("👤 My Profile", callback_data="menu:profile")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def _has_completed_profile(tg_user: TelegramUser, session) -> bool:
+    if not tg_user:
+        return False
+    if tg_user.candidate_id:
+        cand_res = await session.execute(select(Candidate).where(Candidate.id == tg_user.candidate_id))
+        candidate = cand_res.scalars().first()
+        if candidate:
+            if candidate.preferred_roles_list or candidate.skills_list or candidate.preferred_locations_list:
+                return True
+    if tg_user.keywords_list:
+        return True
+    return False
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = str(update.effective_chat.id)
     db = get_db()
@@ -66,10 +108,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if existing:
             existing.is_active = True
             await session.commit()
-            await update.message.reply_text(
-                "Welcome back! You're already registered for job alerts.\n"
-                "Use /settings to configure your preferences."
-            )
+            if await _has_completed_profile(existing, session):
+                await update.message.reply_text(
+                    "Welcome back to Task Sniffer!\n\nYour dashboard is ready.",
+                    reply_markup=_main_menu_keyboard(),
+                )
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("Set Up My Profile", callback_data="profile:start")],
+                    [InlineKeyboardButton("Link Existing Account", callback_data="menu:link")],
+                    [InlineKeyboardButton("Open Dashboard", callback_data="menu:main")],
+                ]
+                await update.message.reply_text(
+                    "Complete your profile to get better matches, or link an existing account.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
         else:
             new_user = TelegramUser(
                 chat_id=chat_id,
@@ -78,19 +131,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             session.add(new_user)
             await session.commit()
+            keyboard = [
+                [InlineKeyboardButton("Set Up My Profile", callback_data="profile:start")],
+                [InlineKeyboardButton("Link Existing Account", callback_data="menu:link")],
+            ]
             await update.message.reply_text(
-                "Welcome to Task Sniffer!\n\n"
-                "You'll receive alerts for jobs matching your criteria.\n\n"
-                "Commands:\n"
-                "/top - Latest high-match jobs\n"
-                "/search <query> - Search jobs\n"
-                "/apply <job_id> - Track application\n"
-                "/my_applications - View tracked apps\n"
-                "/update_status <app_id> <status> - Update status\n"
-                "/settings - Configure preferences\n"
-                "/stats - View statistics\n"
-                "/sources - List active sources\n"
-                "/stop - Stop notifications"
+                "Welcome to Task Sniffer!\n\nLet's set up your profile to find relevant jobs.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
 
@@ -111,6 +158,80 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         else:
             await update.message.reply_text("You're not registered. Use /start to begin.")
+
+
+async def link_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = await _ensure_user(update)
+    if not user:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /link <email> <password>")
+        return
+
+    email = context.args[0].strip().lower()
+    password = " ".join(context.args[1:])
+
+    db = get_db()
+    async with db.async_session_factory() as session:
+        result = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = result.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+
+        if tg_user.candidate_id:
+            candidate_res = await session.execute(
+                select(Candidate).where(Candidate.id == tg_user.candidate_id)
+            )
+            linked = candidate_res.scalars().first()
+            label = linked.email if linked and linked.email else tg_user.candidate_id
+            await update.message.reply_text(f"This account is already linked to {label}. Use /unlink first.")
+            return
+
+        user_res = await session.execute(select(User).where(User.email == email))
+        web_user = user_res.scalars().first()
+        if not web_user or not verify_password(password, web_user.hashed_password):
+            await update.message.reply_text("Invalid email or password. Account not linked.")
+            return
+        if not web_user.is_active:
+            await update.message.reply_text("That web account is inactive. Account not linked.")
+            return
+
+        cand_res = await session.execute(select(Candidate).where(Candidate.user_id == web_user.id))
+        candidate = cand_res.scalars().first()
+        if not candidate:
+            candidate = Candidate(
+                user_id=web_user.id,
+                name=web_user.email.split("@")[0],
+                email=web_user.email,
+            )
+            session.add(candidate)
+            await session.flush()
+
+        tg_user.candidate_id = candidate.id
+        await session.commit()
+        await update.message.reply_text(f"Linked to {web_user.email}. You can now use /apply and /my_applications.")
+
+
+async def unlink_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = await _ensure_user(update)
+    if not user:
+        return
+
+    db = get_db()
+    async with db.async_session_factory() as session:
+        result = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = result.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        if not tg_user.candidate_id:
+            await update.message.reply_text("No linked web account.")
+            return
+        tg_user.candidate_id = None
+        await session.commit()
+        await update.message.reply_text("Account unlinked.")
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,59 +335,82 @@ async def set_salary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    db = get_db()
+    user = await _ensure_user(update)
+    if not user:
+        return
+
+    if context.args:
+        query = " ".join(context.args).lower()
+    elif context.user_data.get("awaiting_search") and update.message and update.message.text:
+        query = update.message.text.strip().lower()
+        context.user_data.pop("awaiting_search", None)
+    else:
         await update.message.reply_text("Usage: /search python react")
         return
 
-    query = " ".join(context.args).lower()
-    db = get_db()
-
     async with db.async_session_factory() as session:
-        result = await session.execute(
-            select(Job).where(
+        tg_user = (await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))).scalars().first()
+        candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+        query_stmt = select(Job, CandidateJobScore).outerjoin(
+            CandidateJobScore,
+            (CandidateJobScore.job_id == Job.id)
+            & (CandidateJobScore.candidate_id == candidate.id if candidate else False),
+        ).where(
                 Job.title.ilike(f"%{query}%")
                 | Job.company.ilike(f"%{query}%")
                 | Job.description.ilike(f"%{query}%")
-            ).order_by(Job.created_at.desc()).limit(10)
-        )
-        jobs = result.scalars().all()
+            )
+        query_stmt = query_stmt.order_by(
+            CandidateJobScore.score.desc().nullslast() if candidate else Job.created_at.desc()
+        ).limit(10)
+        jobs = (await session.execute(query_stmt)).all()
 
         if not jobs:
-            await update.message.reply_text(f"No jobs found matching '{query}'")
+            await update.message.reply_text(f"No jobs found matching '{query}'", reply_markup=_main_menu_keyboard())
             return
 
         lines = [f"Results for '{query}':\n"]
-        for i, job in enumerate(jobs, 1):
+        for i, (job, score) in enumerate(jobs, 1):
+            remote = " [Remote]" if job.remote else ""
             lines.append(
-                f"{i}. {job.title}\n"
+                f"{i}. {job.title}{remote}\n"
                 f"   {job.company} | {job.location or 'N/A'}\n"
-                f"   Match: {job.match_score:.0%} | Risk: {job.risk_level or 'pending'}\n"
-                f"   ID: {job.id[:8]}"
+                + (f"   Match: {score.score:.0%}\n" if score else "")
+                + f"   ID: {job.id[:8]}"
             )
 
-        await update.message.reply_text("\n\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines) + "\n\nUse /apply <job_id> to track", reply_markup=_main_menu_keyboard())
 
 
 async def top_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show top matching jobs."""
     user = await _ensure_user(update)
+    if not user:
+        return
     db = get_db()
 
     async with db.async_session_factory() as session:
+        tg_user = (await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))).scalars().first()
+        candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+        if not candidate:
+            await update.message.reply_text("Link your web account and complete your profile to see personalized matches.")
+            return
         result = await session.execute(
-            select(Job)
-            .where(Job.status == "discovered")
-            .order_by(Job.match_score.desc())
+            select(Job, CandidateJobScore)
+            .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+            .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+            .order_by(CandidateJobScore.score.desc())
             .limit(5)
         )
-        jobs = result.scalars().all()
+        jobs = result.all()
 
         if not jobs:
             await update.message.reply_text("No jobs found yet. Run a scan first.")
             return
 
         lines = ["Top matching jobs:\n"]
-        for i, job in enumerate(jobs, 1):
+        for i, (job, score) in enumerate(jobs, 1):
             salary = ""
             if job.salary_min and job.salary_max:
                 salary = f" | {job.salary_min:,}-{job.salary_max:,} {job.salary_currency or 'KES'}"
@@ -277,7 +421,7 @@ async def top_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"{i}. {job.title}\n"
                 f"   {job.company}{remote}{salary}\n"
-                f"   Match: {job.match_score:.0%} | Risk: {job.risk_level or 'pending'}\n"
+                f"   Match: {score.score:.0%} | Risk: {job.risk_level or 'pending'}\n"
                 f"   ID: {job.id[:8]}"
             )
 
@@ -350,7 +494,8 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text(
             "Usage: /apply <job_id>\n"
-            "Use /top or /search to find job IDs."
+            "Use /top or /search to find job IDs.\n"
+            "You must be linked with /link <email> <password> first."
         )
         return
 
@@ -358,6 +503,16 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = get_db()
 
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Job).where(Job.id.startswith(job_ref))
         )
@@ -369,7 +524,7 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         existing_app = await session.execute(
             select(Application).where(
-                Application.candidate_id == user.id,
+                Application.candidate_id == candidate.id,
                 Application.job_id == job.id,
             )
         )
@@ -378,11 +533,16 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         app = Application(
-            candidate_id=user.id,
+            candidate_id=candidate.id,
             job_id=job.id,
             status="shortlisted",
             applied_at=datetime.now(timezone.utc),
-            match_score=job.match_score,
+            match_score=(await session.execute(
+                select(CandidateJobScore.score).where(
+                    CandidateJobScore.candidate_id == candidate.id,
+                    CandidateJobScore.job_id == job.id,
+                )
+            )).scalar_one_or_none(),
             risk_score=job.risk_score,
         )
         session.add(app)
@@ -404,9 +564,19 @@ async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     db = get_db()
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Application)
-            .where(Application.candidate_id == user.id)
+            .where(Application.candidate_id == candidate.id)
             .order_by(Application.created_at.desc())
         )
         apps = result.scalars().all()
@@ -424,9 +594,13 @@ async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             job_title = job.title if job else "Unknown"
             job_company = job.company if job else "Unknown"
 
+            if app.match_score is not None:
+                match_str = f"{app.match_score:.0%}"
+            else:
+                match_str = "N/A"
             lines.append(
                 f"- {job_title} @ {job_company}\n"
-                f"  Status: {app.status} | Match: {app.match_score:.0% if app.match_score else 'N/A'}\n"
+                f"  Status: {app.status} | Match: {match_str}\n"
                 f"  App ID: {app.id[:8]}"
             )
 
@@ -461,9 +635,19 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     db = get_db()
     async with db.async_session_factory() as session:
+        tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+        tg_user = tg_res.scalars().first()
+        if not tg_user:
+            await update.message.reply_text("Please use /start first to register.")
+            return
+        candidate = await _get_linked_candidate(tg_user, session)
+        if not candidate:
+            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            return
+
         result = await session.execute(
             select(Application).where(
-                Application.candidate_id == user.id,
+                Application.candidate_id == candidate.id,
                 Application.id.startswith(app_ref),
             )
         )
@@ -485,3 +669,455 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await session.commit()
 
         await update.message.reply_text(f"Application status updated: {old_status} -> {new_status}")
+
+
+async def profile_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Edit Profile\n\nWhat job titles are you looking for? (e.g., software engineer, web developer)\nSend them comma-separated or one per line.\n\nType /cancel to stop.",
+    )
+    context.user_data["profile_step"] = "titles"
+    return PROFILE_WAIT
+
+
+async def profile_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text.lower() in ["/cancel", "cancel"]:
+        await update.message.reply_text("Profile setup cancelled.", reply_markup=_main_menu_keyboard())
+        context.user_data.pop("profile_step", None)
+        return ConversationHandler.END
+
+    step = context.user_data.get("profile_step")
+    db = get_db()
+
+    if step == "titles":
+        titles = [t.strip().lower() for t in text.replace("\n", ",").split(",") if t.strip()]
+        context.user_data["pref_titles"] = titles
+        await update.message.reply_text(
+            f"Got it. Titles: {', '.join(titles) or 'none'}\n\nWhat skills/keywords matter? (e.g., python, react, sql)\nComma-separated or one per line."
+        )
+        context.user_data["profile_step"] = "skills"
+        return PROFILE_WAIT
+    elif step == "skills":
+        skills = [s.strip().lower() for s in text.replace("\n", ",").split(",") if s.strip()]
+        context.user_data["pref_skills"] = skills
+        await update.message.reply_text(
+            f"Skills: {', '.join(skills) or 'none'}\n\nPreferred location? (e.g., Nairobi, Remote, Any)\nOr send 'skip'."
+        )
+        context.user_data["profile_step"] = "location"
+        return PROFILE_WAIT
+    elif step == "location":
+        loc = text.lower()
+        if loc == "skip":
+            loc = "Any"
+        context.user_data["pref_location"] = loc
+        user = await _ensure_user(update)
+        if not user:
+            await update.message.reply_text("Please use /start first to register.", reply_markup=_main_menu_keyboard())
+            context.user_data.pop("profile_step", None)
+            return ConversationHandler.END
+
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            if tg_user and tg_user.candidate_id:
+                cand_res = await session.execute(select(Candidate).where(Candidate.id == tg_user.candidate_id))
+                candidate = cand_res.scalars().first()
+                if candidate:
+                    try:
+                        candidate.preferred_roles_list = context.user_data.get("pref_titles", [])
+                    except Exception:
+                        pass
+                    try:
+                        candidate.skills_list = context.user_data.get("pref_skills", [])
+                    except Exception:
+                        pass
+                    try:
+                        candidate.preferred_locations_list = [loc.title() if loc != "any" else "Remote"]
+                    except Exception:
+                        pass
+                    await rescore_candidate(session, candidate)
+                    await session.commit()
+            else:
+                # Save to telegram user preferences as fallback
+                try:
+                    tg_user.keywords_list = context.user_data.get("pref_skills", [])
+                except Exception:
+                    pass
+                await session.commit()
+
+        titles_s = ", ".join(context.user_data.get("pref_titles", [])) or "none"
+        skills_s = ", ".join(context.user_data.get("pref_skills", [])) or "none"
+        await update.message.reply_text(
+            f"Profile saved!\n\nJob titles: {titles_s}\nSkills: {skills_s}\nLocation: {loc.title()}\n\nUse the menu to search jobs.",
+            reply_markup=_main_menu_keyboard(),
+        )
+        for k in ["profile_step", "pref_titles", "pref_skills", "pref_location"]:
+            context.user_data.pop(k, None)
+        return ConversationHandler.END
+
+    await update.message.reply_text("Something went wrong. Use the menu to try again.", reply_markup=_main_menu_keyboard())
+    context.user_data.pop("profile_step", None)
+    return ConversationHandler.END
+
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    data = query.data or ""
+    db = get_db()
+
+    if data == "menu:main":
+        try:
+            await query.edit_message_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
+        except Exception:
+            try:
+                await query.message.reply_text("Task Sniffer Menu", reply_markup=_main_menu_keyboard())
+            except Exception:
+                pass
+        return
+    if data == "menu:find":
+        keyboard = [
+            [InlineKeyboardButton("🔥 Recommended", callback_data="jobs:rec:1")],
+            [InlineKeyboardButton("🔍 Search", callback_data="menu:search")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ]
+        try:
+            await query.edit_message_text(
+                "Find Jobs\n\nBrowse recommended jobs or search by keyword.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            try:
+                await query.message.reply_text("Find Jobs\n\nBrowse recommended jobs or search by keyword.", reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data.startswith("jobs:rec:"):
+        try:
+            page = int(data.split(":")[-1])
+        except Exception:
+            page = 1
+        page = max(1, page)
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if candidate:
+                q = (select(Job, CandidateJobScore)
+                     .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+                     .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+                     .order_by(CandidateJobScore.score.desc()))
+                result = await session.execute(q.offset((page-1)*5).limit(5))
+                jobs = result.all()
+            else:
+                jobs = []
+            if not jobs:
+                text = "Top Matches\n\n" + ("Link your web account and complete your profile to see personalized matches." if not candidate else "Nothing strong right now.")
+            else:
+                lines = [f"Top Matches (page {page}):\n"]
+                for i, (job, score) in enumerate(jobs, 1+(page-1)*5):
+                    remote = " [Remote]" if job.remote else ""
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {score.score:.0%}\n   ID: {job.id[:8]}")
+                text = "\n\n".join(lines)
+        keyboard = []
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"jobs:rec:{page-1}"))
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"jobs:rec:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+        try:
+            await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data.startswith("jobs:all:"):
+        try:
+            page = int(data.split(":")[-1])
+        except Exception:
+            page = 1
+        page = max(1, page)
+        async with db.async_session_factory() as session:
+            q = select(Job).order_by(Job.created_at.desc())
+            result = await session.execute(q.offset((page-1)*5).limit(5))
+            jobs = result.scalars().all()
+            if not jobs:
+                text = "All Jobs\n\nNo jobs found."
+            else:
+                lines = [f"All Jobs (page {page}):\n"]
+                for i, job in enumerate(jobs, 1+(page-1)*5):
+                    remote = " [Remote]" if job.remote else ""
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   ID: {job.id[:8]}")
+                text = "\n\n".join(lines)
+        keyboard = []
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"jobs:all:{page-1}"))
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"jobs:all:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+        keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")])
+        try:
+            await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data == "menu:topjobs":
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if not candidate:
+                await query.edit_message_text("Link your web account and complete your profile to see personalized matches.")
+                return
+            result = await session.execute(
+                select(Job, CandidateJobScore)
+                .join(CandidateJobScore, CandidateJobScore.job_id == Job.id)
+                .where(Job.status == "discovered", CandidateJobScore.candidate_id == candidate.id)
+                .order_by(CandidateJobScore.score.desc())
+                .limit(5)
+            )
+            jobs = result.all()
+            if not jobs:
+                text = "Top Jobs\n\nNo jobs found yet."
+            else:
+                lines = ["Top Jobs:\n"]
+                for i, (job, score) in enumerate(jobs, 1):
+                    remote = " [Remote]" if job.remote else ""
+                    url_status = job.url_status or "NEEDS_REVIEW"
+                    warn = " ⚠️" if url_status != "VALID" else ""
+                    lines.append(f"{i}. {job.title}{remote}{warn}\n   {job.company} | {job.location or 'N/A'}\n   Match: {score.score:.0%}\n   ID: {job.id[:8]}")
+                text = "\n\n".join(lines) + "\n\nUse /apply <job_id> to track."
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:find")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+        ]
+        try:
+            await query.edit_message_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data == "menu:search":
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
+        await query.edit_message_text(
+            "Search Jobs\n\nType your search query now.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]),
+        )
+        context.user_data["awaiting_search"] = True
+        return
+    if data == "profile:start":
+        try:
+            await query.edit_message_text("Starting profile setup...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]))
+        except Exception:
+            pass
+        context.user_data["profile_step"] = "titles"
+        context.user_data["profile_new"] = True
+        try:
+            await query.message.reply_text("Let's build your profile.\n\nStep 1/4: Preferred job titles (comma separated). Or type /skip to skip.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="menu:main")]]))
+        except Exception:
+            pass
+        return
+    if data == "menu:profile":
+        user = await _ensure_user(update)
+        if not user:
+            try:
+                await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            except Exception:
+                pass
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if candidate:
+                roles = ", ".join(candidate.preferred_roles_list) if candidate.preferred_roles_list else "(none)"
+                skills = ", ".join(candidate.skills_list) if candidate.skills_list else "(none)"
+                locs = ", ".join(candidate.preferred_locations_list) if candidate.preferred_locations_list else "(none)"
+                text = f"My Profile\n\nLinked: Yes\n\nRoles: {roles}\nSkills: {skills}\nLocations: {locs}"
+            elif tg_user:
+                roles = ", ".join(tg_user.keywords_list) if tg_user.keywords_list else "(none)"
+                text = f"My Profile (Telegram)\n\nKeywords: {roles}\n\nLink account and set up full profile for better matching."
+            else:
+                text = "My Profile\n\nNo profile set."
+        keyboard = [
+            [InlineKeyboardButton("Edit Profile", callback_data="profile:start")],
+            [InlineKeyboardButton("Link Account", callback_data="menu:link")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+        ]
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data == "menu:link":
+        await query.edit_message_text(
+            "Link Account\n\nUse /link <email> <password> to link your web account.\nUse /unlink to unlink.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:profile")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:prefs":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+            return
+        await query.edit_message_text(
+            "Job Preferences\n\nUse /settings to view.\nUse /set_keywords <k1,k2>, /set_exclude <k1,k2>, /set_salary <amount>.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:apps":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
+            if not candidate:
+                await query.edit_message_text(
+                    "My Applications\n\nLink your account to track applications scoped to your profile.\nUse /link <email> <password>.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Link Account", callback_data="menu:link")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+                )
+                return
+            app_res = await session.execute(select(Application).where(Application.candidate_id == candidate.id).order_by(Application.created_at.desc()).limit(10))
+            apps = app_res.scalars().all()
+            if not apps:
+                text = "My Applications\n\nNo applications yet.\nUse /apply <job_id> to track an application."
+            else:
+                lines = ["My Applications:\n"]
+                for app in apps:
+                    status = app.status or "tracked"
+                    lines.append(f"- {app.job_id[:8]} | {status}")
+                text = "\n".join(lines)
+        keyboard = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            try:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception:
+                pass
+        return
+    if data == "menu:alerts":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            status = "Active" if tg_user and tg_user.is_active else "Inactive"
+            text = f"Job Alerts\n\nStatus: {status}\nUse /start to re-enable or /stop to pause alerts."
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "menu:settings":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]))
+            return
+        keyboard = [
+            [InlineKeyboardButton("⏸️ Pause Alerts", callback_data="alert:pause")],
+            [InlineKeyboardButton("▶️ Resume Alerts", callback_data="alert:resume")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")],
+        ]
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            status = "Active" if tg_user and tg_user.is_active else "Inactive"
+        await query.edit_message_text(
+            f"Settings\n\nAlerts: {status}\n\nManage preferences with /settings.\nUse buttons to pause/resume alerts.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+    if data == "alert:pause":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            if tg_user:
+                tg_user.is_active = False
+                await session.commit()
+        await query.edit_message_text("Alerts paused.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "alert:resume":
+        user = await _ensure_user(update)
+        if not user:
+            await query.edit_message_text("Please use /start first to register.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")]]))
+            return
+        async with db.async_session_factory() as session:
+            tg_res = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
+            tg_user = tg_res.scalars().first()
+            if tg_user:
+                tg_user.is_active = True
+                await session.commit()
+        await query.edit_message_text("Alerts resumed.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:settings")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]))
+        return
+    if data == "menu:na:saved":
+        await query.edit_message_text(
+            "Saved Jobs\n\nNot available in current build. This would need a saved_jobs/bookmarks model.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")]]),
+        )
+        return
+    if data == "menu:help":
+        await query.edit_message_text(
+            "Task Sniffer Help\n\nCommands:\n/start - Main menu\n/top - Top jobs\n/search <q> - Search\n/link <email> <pass> - Link\n/apply <job_id> - Track\n/my_applications - View apps\n/settings - Preferences\n\nButtons are easier - use the menu!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
+        )
+        return
+
+    try:
+        await query.edit_message_text("Menu", reply_markup=_main_menu_keyboard())
+    except Exception:
+        try:
+            await query.message.reply_text("Menu", reply_markup=_main_menu_keyboard())
+        except Exception:
+            pass
+

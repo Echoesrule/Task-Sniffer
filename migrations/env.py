@@ -1,6 +1,7 @@
 """Alembic environment configuration."""
 
 from logging.config import fileConfig
+import os
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -8,6 +9,10 @@ from sqlalchemy import engine_from_config, pool
 from backend.models.database import Base
 
 config = context.config
+database_url = os.getenv("DATABASE_URL_SYNC")
+if database_url:
+    # Alembic config uses percent interpolation; preserve encoded URL characters.
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import httpx
 from sqlalchemy import func as sa_func, select
 
-from backend.models.database import Database, IngestionError, Job, Source
+from backend.models.database import Candidate, Database, IngestionError, Job, Source
 from backend.scrapers.adapter import JobSourceAdapter, ListingItem
 from backend.services.ingestion import IngestionEngine
 from backend.sources.models import (
@@ -370,15 +370,19 @@ def test_run_source_persists_extracted_skills(tmp_path):
 
 
 def test_run_source_scores_jobs_when_candidate_exists(tmp_path):
-    """New jobs are scored against the stored candidate at ingestion time."""
-    from backend.matching.scoring import ensure_default_candidate
+    """New jobs get independent score rows without mutating shared job rows."""
+    from backend.models.database import CandidateJobScore, User
 
     db = Database(f"sqlite+aiosqlite:///{tmp_path/'t9.db'}")
     _run(db.init_db())
 
     async def scenario():
         async with db.async_session_factory() as session:
-            await ensure_default_candidate(session)
+            user = User(email="score-candidate@example.com", hashed_password="x")
+            session.add(user)
+            await session.flush()
+            candidate = Candidate(user_id=user.id, name="Candidate", email=user.email, skills='["python"]')
+            session.add(candidate)
             await session.commit()
 
         engine = _engine_with(db)
@@ -386,12 +390,14 @@ def test_run_source_scores_jobs_when_candidate_exists(tmp_path):
         result = await engine.run_source("fakesrc")
         async with db.async_session_factory() as session:
             jobs = (await session.execute(select(Job))).scalars().all()
-        return result, jobs
+            scores = (await session.execute(select(CandidateJobScore))).scalars().all()
+        return result, jobs, scores
 
-    result, jobs = _run(scenario())
+    result, jobs, scores = _run(scenario())
     _run(db.close())
 
     assert result.new_jobs == 3
-    assert all(j.match_score > 0.0 for j in jobs)
-    assert all(j.match_breakdown_dict for j in jobs)
-    assert all(j.classification for j in jobs)
+    assert len(scores) == len(jobs) == 3
+    assert all(score.score > 0.0 for score in scores)
+    assert all(score.breakdown for score in scores)
+    assert all(j.match_score == 0.0 and not j.match_breakdown_dict for j in jobs)

@@ -12,7 +12,7 @@ export function JobCard({ job }: { job: Job }) {
     <Link href={`/jobs/${job.id}`}>
       <div className="bg-surface border border-border rounded-xl p-4 hover:border-border-light hover:bg-surface-2 transition-all cursor-pointer group">
         <div className="flex items-start gap-4">
-          <MatchScore score={job.match_score ?? 0} size="md" />
+          <MatchScore score={job.match_score} size="md" />
 
           <div className="flex-1 min-w-0">
             <div className="flex items-start justify-between gap-2">

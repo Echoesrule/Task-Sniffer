@@ -1,10 +1,6 @@
 """Background task definitions."""
 
-import logging
-
 from backend.workers.celery_app import celery_app
-
-logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -43,23 +39,23 @@ async def _ingest_one(name: str, *, force: bool, limit: int | None):
 
 @celery_app.task(bind=True, max_retries=3)
 def analyze_new_jobs(self):
-    """Analyze jobs that haven't been analyzed yet."""
-    logger.info("Analyzing new jobs...")
+    """Disabled: risk and match analysis run as part of ingestion."""
+    return {"status": "disabled", "reason": "analysis is performed during ingestion"}
 
 
 @celery_app.task(bind=True, max_retries=3)
 def update_source_stats(self):
-    """Update source intelligence metrics."""
-    logger.info("Updating source stats...")
+    """Disabled: source metrics are updated by the ingestion engine."""
+    return {"status": "disabled", "reason": "metrics are updated during ingestion"}
 
 
 @celery_app.task(bind=True, max_retries=3)
 def match_job_to_candidate(self, job_id: str, candidate_id: str):
-    """Match a specific job to a candidate."""
-    logger.info(f"Matching job {job_id} to candidate {candidate_id}")
+    """Disabled until personalized match results have a per-user store."""
+    return {"status": "disabled", "reason": "per-user match persistence is not implemented"}
 
 
 @celery_app.task(bind=True, max_retries=3)
 def process_cv_upload(self, candidate_id: str, cv_path: str):
-    """Parse and extract structured data from uploaded CV."""
-    logger.info(f"Processing CV for candidate {candidate_id}")
+    """Disabled until CV parsing is implemented and explicitly enabled."""
+    return {"status": "disabled", "reason": "CV parsing is not implemented"}

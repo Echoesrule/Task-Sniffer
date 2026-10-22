@@ -8,6 +8,7 @@ and the CORS credential policy.
 from __future__ import annotations
 
 import asyncio
+import base64
 from pathlib import Path
 
 import httpx
@@ -17,7 +18,7 @@ from backend.api import deps as api_deps
 from backend.api.routes import candidates as candidates_routes
 from backend.api.routes import sources as sources_routes
 from backend.config import Settings
-from backend.models.database import Database, User
+from backend.models.database import Candidate, Database, User
 from backend.security import create_access_token, hash_password
 
 
@@ -45,6 +46,8 @@ def _with_app(router, tmp_path, prefix=""):
                 is_active=True,
             )
             session.add(user)
+            await session.flush()
+            session.add(Candidate(user_id=user.id, name="Test User", email=user.email))
             await session.commit()
 
     _run(seed())
@@ -55,35 +58,38 @@ def _with_app(router, tmp_path, prefix=""):
 def test_cv_upload_sanitizes_filename_and_stays_in_storage(tmp_path, monkeypatch):
     app, db, token = _with_app(candidates_routes.router, tmp_path)
     storage = tmp_path / "cvs"
-    monkeypatch.setattr(
-        candidates_routes,
-        "get_settings",
-        lambda: Settings(cv_storage_path=str(storage)),
-    )
+    monkeypatch.setattr(candidates_routes, "get_settings", lambda: Settings(
+        cv_storage_path=str(storage), encryption_key=base64.urlsafe_b64encode(b"k" * 32).decode()
+    ))
     original = api_deps._db
     api_deps.set_db(db)
 
     async def scenario():
         async with _client(app) as client:
-            return await client.post(
+            uploaded = await client.post(
                 "/cv",
                 headers={"Authorization": f"Bearer {token}"},
                 files={"file": ("../../evil.pdf", b"%PDF-1.4 payload", "application/pdf")},
             )
+            downloaded = await client.get("/cv/file", headers={"Authorization": f"Bearer {token}"})
+            return uploaded, downloaded
 
     try:
-        response = _run(scenario())
+        response, downloaded = _run(scenario())
     finally:
         api_deps._db = original
         _run(db.close())
 
     assert response.status_code == 200
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"%PDF-1.4 payload"
     stored = list(storage.iterdir())
     assert len(stored) == 1
     name = stored[0].name
     assert name.endswith(".pdf")
     assert "evil" not in name and ".." not in name
     assert stored[0].parent == storage
+    assert b"%PDF-1.4 payload" not in stored[0].read_bytes()
     # nothing escaped the storage directory
     assert not (tmp_path.parent / "evil.pdf").exists()
     assert not (tmp_path / "evil.pdf").exists()
@@ -142,6 +148,29 @@ def test_cv_upload_rejects_oversized_file(tmp_path, monkeypatch):
         _run(db.close())
 
     assert response.status_code == 413
+
+
+def test_cv_upload_fails_closed_without_encryption_key(tmp_path, monkeypatch):
+    app, db, token = _with_app(candidates_routes.router, tmp_path)
+    storage = tmp_path / "cvs"
+    monkeypatch.setattr(candidates_routes, "get_settings", lambda: Settings(cv_storage_path=str(storage)))
+    original = api_deps._db
+    api_deps.set_db(db)
+
+    async def scenario():
+        async with _client(app) as client:
+            return await client.post(
+                "/cv", headers={"Authorization": f"Bearer {token}"},
+                files={"file": ("cv.pdf", b"plaintext", "application/pdf")},
+            )
+
+    try:
+        response = _run(scenario())
+    finally:
+        api_deps._db = original
+        _run(db.close())
+    assert response.status_code == 503
+    assert not storage.exists()
 
 
 def test_source_mutation_requires_token(tmp_path):

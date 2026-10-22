@@ -94,3 +94,13 @@ async def get_current_user(
         "email": user.email,
         "role": getattr(user, "role", "user") or "user",
     }
+
+
+async def get_optional_current_user(
+    authorization: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any] | None:
+    """Resolve an authenticated user when supplied, while preserving public job browsing."""
+    if not authorization:
+        return None
+    return await get_current_user(authorization=authorization, db=db)

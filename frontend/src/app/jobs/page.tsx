@@ -24,15 +24,27 @@ export default function JobsPage() {
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string>>({})
   const [sortBy, setSortBy] = useState("match")
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const pageSize = 20
+
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search).get("q")
+    if (query) setSearch(query)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    jobsService
-      .list({ page_size: "100" })
+    const timer = window.setTimeout(() => {
+      setLoading(true)
+      const request = search.trim()
+        ? jobsService.search(search.trim(), page, pageSize)
+        : jobsService.list({ page: String(page), page_size: String(pageSize) })
+      request
       .then(res => {
         if (cancelled) return
         setJobs(res.jobs as Job[])
+        setTotal(res.total ?? 0)
         setError(null)
       })
       .catch(err => {
@@ -42,22 +54,14 @@ export default function JobsPage() {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
-    return () => { cancelled = true }
-  }, [])
+    }, search.trim() ? 250 : 0)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [page, search])
 
   const sourceOptions = ["All", ...Array.from(new Set(jobs.map(j => j.source).filter(Boolean))).sort()]
   const filters = baseFilters.map(f => (f.label === "Source" ? { ...f, options: sourceOptions } : f))
 
   let filtered = [...jobs]
-
-  if (search) {
-    const q = search.toLowerCase()
-    filtered = filtered.filter(j =>
-      j.title.toLowerCase().includes(q) ||
-      j.company.toLowerCase().includes(q) ||
-      j.skills.some(s => s.toLowerCase().includes(q))
-    )
-  }
 
   if (activeFilters.Source && activeFilters.Source !== "All") {
     filtered = filtered.filter(j => j.source.toLowerCase() === activeFilters.Source.toLowerCase())
@@ -87,8 +91,8 @@ export default function JobsPage() {
             <div className="flex-1 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-2">
               <Search className="w-4 h-4 text-text-muted shrink-0" />
               <input
-                type="text" value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Search by title, company, or skill..."
+                type="text" value={search} onChange={e => { setSearch(e.target.value); setPage(1) }}
+                placeholder="Search jobs by title, company, or description..."
                 className="bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none w-full"
               />
               {search && (
@@ -133,15 +137,38 @@ export default function JobsPage() {
                 <p className="text-text-muted text-sm mt-1">{error}</p>
               </div>
             ) : filtered.length > 0 ? (
-              filtered.map((job, i) => (
-                <motion.div key={job.id}
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.2, delay: i * 0.03 }}
-                >
-                  <JobCard job={job} />
-                </motion.div>
-              ))
+              <>
+                {filtered.map((job, i) => (
+                  <motion.div key={job.id}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.2, delay: i * 0.03 }}
+                  >
+                    <JobCard job={job} />
+                  </motion.div>
+                ))}
+                <div className="flex items-center justify-between pt-4">
+                  <span className="text-xs text-text-muted">
+                    Page {page} {total > 0 && `of ${Math.max(1, Math.ceil(total / pageSize))}`} ({total} total)
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      disabled={page <= 1 || loading}
+                      className="px-3 py-1.5 text-xs bg-surface border border-border rounded-lg text-text-secondary disabled:opacity-50 disabled:cursor-not-allowed hover:text-text-primary"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => setPage(p => p + 1)}
+                      disabled={loading || page >= Math.ceil(total / pageSize)}
+                      className="px-3 py-1.5 text-xs bg-surface border border-border rounded-lg text-text-secondary disabled:opacity-50 disabled:cursor-not-allowed hover:text-text-primary"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </>
             ) : (
               <div className="text-center py-16">
                 <Search className="w-10 h-10 text-text-muted mx-auto mb-3" />

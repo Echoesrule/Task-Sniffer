@@ -53,7 +53,7 @@ class SourceInfo(BaseModel):
     duplicate_rate: float = 0.0
     invalid_url_rate: float = 0.0
     review_url_rate: float = 0.0
-    average_match_score: float = 0.0
+    average_match_score: float | None = None
     risk_rate: float = 0.0
     applications: int = 0
 
@@ -119,7 +119,10 @@ async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse
                 duplicate_rate=row.duplicate_rate or 0.0,
                 invalid_url_rate=row.invalid_url_rate or 0.0,
                 review_url_rate=row.review_url_rate or 0.0,
-                average_match_score=row.average_match_score or 0.0,
+                # The source aggregate came from shared Job scores and is not a
+                # valid personalized metric. Candidate-scoped analytics expose
+                # the replacement for authenticated users.
+                average_match_score=None,
                 risk_rate=row.risk_rate or 0.0,
                 applications=row.applications or 0,
             )

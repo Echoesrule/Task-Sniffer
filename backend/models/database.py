@@ -73,6 +73,7 @@ class Source(Base):
     jobs_found = Column(Integer, default=0)
     unique_jobs = Column(Integer, default=0)
     duplicate_rate = Column(Float, default=0.0)
+    # Legacy aggregate only; personalized match metrics live with CandidateJobScore.
     average_match_score = Column(Float, default=0.0)
     risk_rate = Column(Float, default=0.0)
     applications = Column(Integer, default=0)
@@ -164,6 +165,7 @@ class Job(Base):
     risk_level = Column(String(10), nullable=True)
     risk_flags = Column(Text, default="[]")
 
+    # Deprecated compatibility columns. Never read as a candidate's score.
     match_score = Column(Float, default=0.0)
     match_breakdown = Column(Text, default="{}")
     classification = Column(String(50), nullable=True)
@@ -352,6 +354,34 @@ class Candidate(Base):
         return f"<Candidate {self.name}>"
 
 
+class CandidateJobScore(Base):
+    """A match score computed for one candidate and one shared job.
+
+    The legacy Job.match_score fields are retained for old databases and
+    integrations, but are not a source of personalized scores.
+    """
+
+    __tablename__ = "candidate_job_scores"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    candidate_id = Column(String(36), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    score = Column(Float, nullable=False)
+    breakdown = Column(Text, nullable=False, default="{}")
+    classification = Column(String(50), nullable=True)
+    algorithm_version = Column(String(50), nullable=False, default="job-scorer-v1")
+    scored_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    candidate = relationship("Candidate")
+    job = relationship("Job")
+
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "job_id", name="uq_candidate_job_score"),
+        Index("ix_candidate_job_scores_candidate_score", "candidate_id", "score"),
+        Index("ix_candidate_job_scores_job_id", "job_id"),
+    )
+
+
 class Application(Base):
     """Tracks job applications."""
 
@@ -474,6 +504,15 @@ class TelegramUser(Base):
     username = Column(String(255), nullable=True)
     first_name = Column(String(255), nullable=True)
 
+    # Explicit account link to a web candidate profile. Never populated from the
+    # Telegram numeric id; only set by the credential-verified /link command.
+    candidate_id = Column(
+        String(36),
+        ForeignKey("candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     is_active = Column(Boolean, default=True)
     keywords = Column(Text, default="[]")
     exclude_keywords = Column(Text, default="[]")
@@ -508,6 +547,35 @@ class TelegramUser(Base):
 
     def __repr__(self) -> str:
         return f"<TelegramUser {self.chat_id} ({self.username})>"
+
+
+class TelegramAlertDelivery(Base):
+    """Durable idempotency record for a Telegram user's job alert."""
+
+    __tablename__ = "telegram_alert_deliveries"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    telegram_user_id = Column(
+        String(36), ForeignKey("telegram_users.id", ondelete="CASCADE"), nullable=False
+    )
+    job_id = Column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=1)
+    last_error = Column(String(1000), nullable=True)
+    claim_token = Column(String(36), nullable=True)
+    claim_until = Column(DateTime(timezone=True), nullable=True)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    telegram_user = relationship("TelegramUser")
+    job = relationship("Job")
+
+    __table_args__ = (
+        UniqueConstraint("telegram_user_id", "job_id", name="uq_telegram_alert_user_job"),
+        Index("ix_telegram_alert_delivery_status", "status"),
+    )
 
 
 class Database:
@@ -604,5 +672,17 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "skills_detail": "TEXT DEFAULT '[]'",
         "skills_required": "TEXT DEFAULT '[]'",
         "skills_preferred": "TEXT DEFAULT '[]'",
+    },
+    "candidate_job_scores": {
+        "classification": "VARCHAR(50)",
+    },
+    "telegram_users": {
+        "candidate_id": "VARCHAR(36)",
+    },
+    "telegram_alert_deliveries": {
+        "claim_token": "VARCHAR(36)",
+        "claim_until": "DATETIME",
+        "next_attempt_at": "DATETIME",
+        "last_attempt_at": "DATETIME",
     },
 }

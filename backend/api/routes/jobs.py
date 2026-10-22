@@ -6,23 +6,23 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import select, func as sa_func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.api.deps import get_current_user, get_db
+from backend.api.deps import get_current_user, get_db, get_optional_current_user
 from backend.api.schemas import (
     JobListResponse,
     JobResponse,
     JobSearchRequest,
     JobStatsResponse,
 )
-from backend.models.database import Job, Source
+from backend.models.database import Candidate, CandidateJobScore, Job, Source
 
 router = APIRouter()
 
 
-def _job_to_response(job: Job) -> JobResponse:
+def _job_to_response(job: Job, match: CandidateJobScore | None = None) -> JobResponse:
     return JobResponse(
         id=job.id,
         title=job.title,
@@ -44,17 +44,27 @@ def _job_to_response(job: Job) -> JobResponse:
         experience=job.experience_level or "",
         posted_at=job.posted_at,
         fetched_at=job.scraped_at,
-        match_score=job.match_score or 0.0,
-        match_breakdown=job.match_breakdown_dict,
-        classification=job.classification or None,
+        match_score=match.score if match else None,
+        match_breakdown=json.loads(match.breakdown) if match and match.breakdown else {},
+        classification=match.classification if match else None,
         risk_score=job.risk_score or 0.0,
         risk_level=job.risk_level or None,
         status=job.status or "discovered",
     )
 
 
+async def _candidate_id(db: AsyncSession, user_id: str) -> str | None:
+    return (
+        await db.execute(select(Candidate.id).where(Candidate.user_id == user_id).limit(1))
+    ).scalar_one_or_none()
+
+
 @router.get("/stats", response_model=JobStatsResponse)
-async def get_job_stats(db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
+async def get_job_stats(
+    db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(get_optional_current_user),
+) -> JobStatsResponse:
+    candidate_id = await _candidate_id(db, user["user_id"]) if user else None
     total = (await db.execute(select(sa_func.count(Job.id)))).scalar() or 0
 
     by_source_rows = (
@@ -75,7 +85,14 @@ async def get_job_stats(db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
     by_country = {(c or "Unknown"): count for c, count in by_country_rows}
 
     avg_risk = (await db.execute(select(sa_func.avg(Job.risk_score)))).scalar() or 0.0
-    avg_match = (await db.execute(select(sa_func.avg(Job.match_score)))).scalar() or 0.0
+    avg_match = (await db.execute(select(sa_func.avg(CandidateJobScore.score)).where(CandidateJobScore.candidate_id == candidate_id))).scalar() if candidate_id else 0.0
+    strong_matches = (await db.execute(
+        select(sa_func.count(CandidateJobScore.id)).where(
+            CandidateJobScore.candidate_id == candidate_id,
+            CandidateJobScore.score >= 0.75,
+        )
+    )).scalar() if candidate_id else 0
+    latest_created = (await db.execute(select(sa_func.max(Job.created_at)))).scalar()
 
     return JobStatsResponse(
         total_jobs=total,
@@ -83,7 +100,9 @@ async def get_job_stats(db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
         by_country=by_country,
         by_remote={},
         avg_risk_score=round(float(avg_risk), 2),
-        avg_match_score=round(float(avg_match), 2),
+        avg_match_score=round(float(avg_match), 2) if avg_match is not None else None,
+        strong_matches=strong_matches,
+        latest_created_at=latest_created,
     )
 
 
@@ -98,7 +117,9 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(get_optional_current_user),
 ) -> JobListResponse:
+    candidate_id = await _candidate_id(db, user["user_id"]) if user else None
     filters = {
         "source": source, "country": country, "remote": remote,
         "salary_min": salary_min, "match_score_min": match_score_min,
@@ -106,8 +127,9 @@ async def list_jobs(
     }
     filters = {k: v for k, v in filters.items() if v is not None}
 
-    query = select(Job).options(selectinload(Job.source))
-    count_query = select(sa_func.count(Job.id))
+    score_join = and_(CandidateJobScore.job_id == Job.id, CandidateJobScore.candidate_id == candidate_id)
+    query = select(Job, CandidateJobScore).outerjoin(CandidateJobScore, score_join).options(selectinload(Job.source))
+    count_query = select(sa_func.count(Job.id)).outerjoin(CandidateJobScore, score_join)
 
     if source:
         query = query.join(Source).where(Source.name == source)
@@ -122,19 +144,19 @@ async def list_jobs(
         query = query.where(Job.salary_min >= int(salary_min))
         count_query = count_query.where(Job.salary_min >= int(salary_min))
     if match_score_min is not None:
-        query = query.where(Job.match_score >= match_score_min)
-        count_query = count_query.where(Job.match_score >= match_score_min)
+        query = query.where(CandidateJobScore.score >= match_score_min)
+        count_query = count_query.where(CandidateJobScore.score >= match_score_min)
     if risk_level:
         query = query.where(Job.risk_level == risk_level)
         count_query = count_query.where(Job.risk_level == risk_level)
 
     total = (await db.execute(count_query)).scalar() or 0
     offset = (page - 1) * page_size
-    result = await db.execute(query.order_by(Job.created_at.desc()).offset(offset).limit(page_size))
-    db_jobs = result.scalars().all()
+    result = await db.execute(query.order_by(CandidateJobScore.score.desc().nullslast(), Job.created_at.desc()).offset(offset).limit(page_size))
+    db_jobs = result.all()
 
     return JobListResponse(
-        jobs=[_job_to_response(j) for j in db_jobs],
+        jobs=[_job_to_response(job, score) for job, score in db_jobs],
         total=total,
         page=page,
         page_size=page_size,
@@ -143,21 +165,34 @@ async def list_jobs(
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, db: AsyncSession = Depends(get_db)) -> JobResponse:
-    result = await db.execute(select(Job).options(selectinload(Job.source)).where(Job.id == job_id))
-    job = result.scalars().first()
+async def get_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(get_optional_current_user),
+) -> JobResponse:
+    candidate_id = await _candidate_id(db, user["user_id"]) if user else None
+    result = await db.execute(
+        select(Job, CandidateJobScore)
+        .outerjoin(CandidateJobScore, and_(CandidateJobScore.job_id == Job.id, CandidateJobScore.candidate_id == candidate_id))
+        .options(selectinload(Job.source)).where(Job.id == job_id)
+    )
+    row = result.first()
+    job, score = row if row else (None, None)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return _job_to_response(job)
+    return _job_to_response(job, score)
 
 
 @router.post("/search", response_model=JobListResponse)
 async def search_jobs(
     request: JobSearchRequest,
     db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(get_optional_current_user),
 ) -> JobListResponse:
-    query = select(Job).options(selectinload(Job.source))
-    count_query = select(sa_func.count(Job.id))
+    candidate_id = await _candidate_id(db, user["user_id"]) if user else None
+    score_join = and_(CandidateJobScore.job_id == Job.id, CandidateJobScore.candidate_id == candidate_id)
+    query = select(Job, CandidateJobScore).outerjoin(CandidateJobScore, score_join).options(selectinload(Job.source))
+    count_query = select(sa_func.count(Job.id)).outerjoin(CandidateJobScore, score_join)
     pattern = f"%{request.query}%"
 
     query = query.where(Job.title.ilike(pattern) | Job.description.ilike(pattern) | Job.company.ilike(pattern))
@@ -165,11 +200,11 @@ async def search_jobs(
 
     total = (await db.execute(count_query)).scalar() or 0
     offset = (request.page - 1) * request.page_size
-    result = await db.execute(query.order_by(Job.created_at.desc()).offset(offset).limit(request.page_size))
-    db_jobs = result.scalars().all()
+    result = await db.execute(query.order_by(CandidateJobScore.score.desc().nullslast(), Job.created_at.desc()).offset(offset).limit(request.page_size))
+    db_jobs = result.all()
 
     return JobListResponse(
-        jobs=[_job_to_response(j) for j in db_jobs],
+        jobs=[_job_to_response(job, score) for job, score in db_jobs],
         total=total,
         page=request.page,
         page_size=request.page_size,
@@ -206,4 +241,11 @@ async def analyze_job(
     await db.commit()
     await db.refresh(job)
 
-    return _job_to_response(job)
+    candidate_id = await _candidate_id(db, _user["user_id"])
+    score = None
+    if candidate_id:
+        score = (await db.execute(select(CandidateJobScore).where(
+            CandidateJobScore.candidate_id == candidate_id,
+            CandidateJobScore.job_id == job.id,
+        ))).scalars().first()
+    return _job_to_response(job, score)
