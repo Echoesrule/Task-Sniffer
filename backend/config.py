@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     max_jobs_per_source: int = 100
     request_delay_seconds: float = 2.0
 
+    # Optional public ATS board configuration. Identifiers are not credentials;
+    # each source remains disabled until it has IDs and an explicit opt-in.
+    greenhouse_enabled: bool = False
+    greenhouse_board_tokens: str = ""
+    ashby_enabled: bool = False
+    ashby_board_names: str = ""
+    workable_account_subdomains: str = ""
+
     # Matching weights
     weight_skills: float = 0.30
     weight_experience: float = 0.20

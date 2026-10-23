@@ -100,16 +100,20 @@ async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse
                 url=row.url or "",
                 tier=row.tier or 3,
                 country_focus=row.country_focus or "GLOBAL",
-                enabled=bool(row.enabled),
+                # Registry policy is authoritative; DB enabled may be stale.
+                enabled=cfg.crawlable if cfg else False,
                 access_method=(row.access_method or "html"),
                 permission_status=(row.permission_status or "REVIEW"),
                 robots_status=(row.robots_status or "UNKNOWN"),
                 provenance=(row.provenance or "unknown"),
                 requires_auth=bool(row.requires_auth),
                 rate_limit=row.rate_limit or 2.0,
-                crawlable=cfg.crawlable if cfg else bool(row.enabled),
+                crawlable=cfg.crawlable if cfg else False,
                 blocked_reason=default_registry.refuse_reason(row.name) if cfg else None,
-                source_status=row.source_status or "ACTIVE",
+                source_status=(
+                    "DISABLED" if cfg and not cfg.crawlable
+                    else row.source_status or "ACTIVE"
+                ),
                 pause_reason=row.pause_reason,
                 last_audited=_iso(row.last_audited),
                 last_scraped_at=_iso(row.last_scraped_at),
@@ -138,7 +142,7 @@ async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse
                 url=cfg.url if cfg else "",
                 tier=cfg.tier if cfg else 3,
                 country_focus=cfg.country_focus if cfg else "GLOBAL",
-                enabled=cfg.source_status.value != "DISABLED" if cfg else False,
+                enabled=cfg.crawlable if cfg else False,
                 access_method=cfg.access_method.value if cfg else "html",
                 permission_status=cfg.permission_status.value if cfg else "REVIEW",
                 robots_status=cfg.robots_status.value if cfg else "UNKNOWN",

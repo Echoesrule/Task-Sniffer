@@ -10,6 +10,7 @@ from backend.scrapers.adapters.myjobmag import MyJobMagAdapter
 from backend.scrapers.adapters.corporatestaffing import CorporateStaffingAdapter
 from backend.scrapers.adapters.kra import KraAdapter
 from backend.scrapers.adapters.psc import PscAdapter
+from backend.scrapers.adapters.workable import WorkableAdapter
 
 ADAPTER_CLASSES = {
     FuzuAdapter.name: FuzuAdapter,
@@ -17,6 +18,7 @@ ADAPTER_CLASSES = {
     CorporateStaffingAdapter.name: CorporateStaffingAdapter,
     KraAdapter.name: KraAdapter,
     PscAdapter.name: PscAdapter,
+    WorkableAdapter.name: WorkableAdapter,
 }
 
 __all__ = [
@@ -25,5 +27,6 @@ __all__ = [
     "CorporateStaffingAdapter",
     "KraAdapter",
     "PscAdapter",
+    "WorkableAdapter",
     "ADAPTER_CLASSES",
 ]

@@ -167,6 +167,8 @@ class SourceConfig(BaseModel):
             return False
         if self.permission_blocked:
             return False
+        if self.source_status == SourceStatus.DISABLED:
+            return False
         if self.paused:
             if self.retry_at and self.retry_at <= datetime.now(timezone.utc):
                 return True

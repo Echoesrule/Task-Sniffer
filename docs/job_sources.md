@@ -181,3 +181,85 @@ rules, and URL-validation requirements before integrating it.
 This directory is a planning list, not a statement that all sources are
 currently integrated, scrapeable, or available through public APIs. Confirm
 current access methods and each site's rules before implementation.
+
+---
+
+## 8. Registered source configuration (reviewed 23 October 2026)
+
+Registration does not mean ingestion is enabled. The shared runner only
+considers sources whose registry policy permits crawling and whose runtime
+status is active. New sources below remain disabled unless the table says an
+existing reviewed adapter is already in use.
+
+| Source | Discovery/access | Adapter | Current activation |
+|---|---|---|---|
+| Fuzu | HTML is technically available, but the current Service Terms prohibit automated scraping/extraction | Existing FuzuAdapter | Disabled, RESTRICTED pending written authorization or an approved feed |
+| MyJobMag Kenya | HTML /jobs and query-free /job/<slug> detail pages; current robots blocks all query-string URLs; terms do not clearly authorize automated extraction | Existing MyJobMagAdapter | Disabled, REVIEW pending permission review; config corrected from RSS to HTML |
+| Corporate Staffing Services | HTML job archive, subject to the existing repository audit | Existing CorporateStaffingAdapter | Existing approved configuration retained; current terms/robots could not be independently reverified |
+| BrighterMonday Kenya | HTML/sitemap discovery is visible, but current robots disallows /job/ detail paths; no permitted end-to-end detail method or terms approval established | Legacy scraper is stale and is not factory-registered | Disabled, REVIEW |
+| Career Point Kenya | HTML is a candidate method; current robots/terms were not verifiable in this review | No adapter | Disabled, REVIEW |
+| JobWeb Kenya | No current permitted discovery method verified | No adapter | Disabled, REVIEW |
+| Greenhouse | Official public Job Board API GET; requires each employer's board token | Existing API adapter | Disabled by default; requires a known board token and GREENHOUSE_ENABLED=true |
+| Ashby | Official public posting API; requires each employer's job-board name | Existing API adapter | Disabled by default; requires a known board name and ASHBY_ENABLED=true |
+| Workable | Documented public published-jobs endpoint; the authenticated SPI API is separate and requires an employer-issued r_jobs token | WorkableAdapter parses the public endpoint | Disabled, REVIEW until downstream third-party display/redistribution is approved |
+| Remotive | Public API and RSS exist | No active adapter | Restricted pending written permission: current Terms prohibit automated extraction/redistribution without it |
+| LinkedIn | No permitted public job retrieval method established | No adapter | Restricted; never scrape |
+| Fiverr | Freelance-gig marketplace, not a job-board adapter; no general public gig API established | No adapter | Restricted; never scrape without authorized access |
+
+### ATS board configuration
+
+Greenhouse and Ashby board identifiers are public routing identifiers, not
+secrets. Configure only employer boards that have been individually selected:
+
+~~~dotenv
+GREENHOUSE_ENABLED=false
+GREENHOUSE_BOARD_TOKENS=
+ASHBY_ENABLED=false
+ASHBY_BOARD_NAMES=
+~~~
+
+The values are comma-separated. Both a non-empty identifier list and the
+matching explicit enable flag are required. Do not place Workable employer SPI
+tokens in these fields. WORKABLE_ACCOUNT_SUBDOMAINS configures the documented
+public account endpoint for tests or a future reviewed activation; it does not
+grant third-party redistribution permission and cannot enable the current
+REVIEW source.
+
+No universal Greenhouse or Ashby endpoint enumerates all employers. Discover
+and configure employer board identifiers individually; never guess slugs.
+
+### Evidence and limitations
+
+- Greenhouse's official Job Board documentation says GET data is public without
+  authentication and exposes jobs per board token:
+  https://developers.greenhouse.io/job-board.html
+- Ashby's official posting API requires a job-board name in its path:
+  https://developers.ashbyhq.com/docs/public-job-posting-api
+- Workable documents a public published-jobs endpoint for custom careers pages
+  and documents SPI /jobs separately with the r_jobs scope:
+  https://help.workable.com/hc/en-us/articles/115012771647-Using-the-Workable-API-to-create-a-careers-page
+- Fuzu's current Global Service Terms prohibit automated scraping/extraction
+  without authorization:
+  https://www.fuzu.com/legal/terms
+- MyJobMag's robots file permits only selected path patterns, while its terms
+  page (revised 2012) does not clearly address automated job-data extraction;
+  the registry therefore keeps it disabled pending permission review:
+  https://www.myjobmag.co.ke/robots.txt and https://www.myjobmag.co.ke/terms
+- Remotive's current Terms of Use prohibit automated access and redistribution
+  without written permission. Its API page additionally requires attribution
+  and a backlink and restricts some third-party listing and signup uses:
+  https://remotive.com/terms-of-use and https://remotive.com/remote-jobs/api
+- LinkedIn's current User Agreement explicitly prohibits scraping/copying with
+  crawlers and bots. Developer portal access by itself is not permission for
+  this use:
+  https://www.linkedin.com/legal/user-agreement
+- Fiverr's Community Standards state that scraping data from the platform is
+  prohibited:
+  https://help.fiverr.com/hc/en-us/articles/37554441398929-Our-Community-Standards
+
+The current BrighterMonday robots file disallows /job/ and publishes listing
+sitemaps; this does not by itself authorize fetching those job pages. Current
+robots or terms for Career Point, JobWeb and Corporate Staffing were not
+independently confirmed by the available documentation fetch. Existing
+Corporate Staffing activation was retained from the repository's prior source
+audit; reverify before changing its configuration.

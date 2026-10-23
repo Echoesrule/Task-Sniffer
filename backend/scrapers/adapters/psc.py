@@ -7,7 +7,6 @@ actual applications run through the psckjobs.go.ke portal with an account, so
 
 from __future__ import annotations
 
-import logging
 import re
 from urllib.parse import urlparse
 
@@ -16,8 +15,6 @@ from backend.sources.models import SourceConfig
 from backend.sources.rate_limit import RateLimiter
 
 from ._common import absolute, clean_text, dedupe_by_url, job_title_from_container
-
-logger = logging.getLogger(__name__)
 
 _DETAIL = re.compile(r"/(job|jobs|vacancy|vacancies|advert|announcement|career|careers|posting|position)[^/?#]*/[^/?#]+/?$", re.IGNORECASE)
 
@@ -39,11 +36,7 @@ class PscAdapter(JobSourceAdapter):
     async def _fetch(self, url: str, limiter: RateLimiter | None) -> str:
         if limiter is not None:
             await limiter.wait_slot()
-        try:
-            return await self.fetch(url) or ""
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[psc] jobs fetch failed %s: %s", url, exc)
-            return ""
+        return await self.fetch(url) or ""
 
     def _parse_page(self, html: str, base_url: str) -> list[ListingItem]:
         if not html:
