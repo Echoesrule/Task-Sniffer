@@ -12,24 +12,73 @@ function isUnsafeMethod(method: string): boolean {
   return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())
 }
 
-async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+// These endpoints must never trigger the automatic refresh/retry loop: a 401
+// there means bad credentials or an already-invalid session.
+const NO_REFRESH_PATHS = new Set(["/auth/login", "/auth/register", "/auth/refresh"])
+
+function buildHeaders(options: RequestInit | undefined, method: string): Record<string, string> {
   const isFormData = typeof FormData !== "undefined" && options?.body instanceof FormData
-  const method = options?.method || "GET"
   const headers: Record<string, string> = isFormData ? {} : { "Content-Type": "application/json" }
   // Double-submit CSRF protection for cookie-authenticated state changes.
   if (isUnsafeMethod(method)) {
     const csrf = getCookie("csrf_token")
     if (csrf) headers["X-CSRF-Token"] = csrf
   }
-  const mergedHeaders = { ...headers, ...(options?.headers as Record<string, string> | undefined) }
-  let res: Response
-  try {
-    res = await fetch(`${API_BASE}${path}`, {
+  return { ...headers, ...(options?.headers as Record<string, string> | undefined) }
+}
+
+let refreshInFlight: Promise<boolean> | null = null
+
+/** Exchange the HttpOnly refresh cookie for a fresh access token. */
+async function refreshSession(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = (async () => {
+    const headers: Record<string, string> = {}
+    const csrf = getCookie("csrf_token")
+    if (csrf) headers["X-CSRF-Token"] = csrf
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        credentials: "include",
+        headers,
+      })
+      return res.ok
+    } catch {
+      return false
+    } finally {
+      refreshInFlight = null
+    }
+  })()
+  return refreshInFlight
+}
+
+function notifyUnauthorized(): void {
+  if (
+    typeof window !== "undefined" &&
+    typeof window.dispatchEvent === "function" &&
+    typeof Event !== "undefined"
+  ) {
+    window.dispatchEvent(new Event("auth:unauthorized"))
+  }
+}
+
+async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  const method = options?.method || "GET"
+  const send = () =>
+    fetch(`${API_BASE}${path}`, {
       ...options,
       method,
       credentials: "include",
-      headers: mergedHeaders,
+      headers: buildHeaders(options, method),
     })
+
+  let res: Response
+  try {
+    res = await send()
+    if (res.status === 401 && !NO_REFRESH_PATHS.has(path)) {
+      // An expired access cookie is recoverable while the refresh cookie lives.
+      if (await refreshSession()) res = await send()
+    }
   } catch (e: any) {
     const err = new Error("Network error")
     ;(err as any).status = 0
@@ -47,6 +96,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
       // ignore
     }
     if (res.status === 401) {
+      if (!NO_REFRESH_PATHS.has(path)) notifyUnauthorized()
       const err = new Error(detail || "Unauthorized")
       ;(err as any).status = 401
       throw err

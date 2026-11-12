@@ -7,6 +7,8 @@ import { MatchScore } from "@/components/ui/match-score"
 import { RiskBadge } from "@/components/ui/risk-badge"
 import { StatCardSkeleton } from "@/components/ui/skeletons"
 import { jobsService, applicationsService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
+import { RequireAuth } from "@/components/auth/require-auth"
 import { timeAgo } from "@/lib/utils"
 import { motion } from "framer-motion"
 import {
@@ -20,6 +22,7 @@ import { useState, useEffect } from "react"
 const STALE_THRESHOLD_HOURS = 24
 
 export default function DashboardPage() {
+  const { status } = useAuth()
   const [stats, setStats] = useState<any>(null)
   const [recentJobs, setRecentJobs] = useState<any[]>([])
   const [applicationStats, setApplicationStats] = useState<any>(null)
@@ -27,6 +30,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (status !== "authenticated") return
     let cancelled = false
     setLoading(true)
     Promise.allSettled([
@@ -50,7 +54,7 @@ export default function DashboardPage() {
         if (!cancelled) setLoading(false)
       })
     return () => { cancelled = true }
-  }, [])
+  }, [status])
 
   const greeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening"
 
@@ -59,6 +63,8 @@ export default function DashboardPage() {
   const lastUpdated = latest ? timeAgo(latest) : null
 
   const strongMatches = stats?.strong_matches ?? 0
+
+  if (status !== "authenticated") return <RequireAuth>{null}</RequireAuth>
 
   return (
     <div className="min-h-screen bg-background flex">

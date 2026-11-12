@@ -9,9 +9,8 @@ import {
   Radar
 } from "lucide-react"
 import { useState } from "react"
-import { useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { authService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -26,8 +25,8 @@ export function Sidebar() {
   const pathname = usePathname()
   const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
-  const [signedIn, setSignedIn] = useState(false)
-  useEffect(() => { authService.isAuthenticated().then(setSignedIn) }, [])
+  const { status, logout } = useAuth()
+  const signedIn = status === "authenticated"
 
   return (
     <aside className={cn(
@@ -67,7 +66,7 @@ export function Sidebar() {
       <div className="border-t border-border p-3">
         <HunterStatus collapsed={collapsed} />
         {!collapsed && <button onClick={async () => {
-          if (signedIn) { await authService.logout(); setSignedIn(false); router.push("/login") }
+          if (signedIn) { await logout(); router.push("/login") }
           else router.push("/login")
         }} className="mt-3 w-full text-left text-xs text-text-secondary hover:text-text-primary px-2">
           {signedIn ? "Sign out" : "Sign in"}

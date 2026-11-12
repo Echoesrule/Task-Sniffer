@@ -165,6 +165,144 @@ def test_telegram_link_code_is_hashed_single_active_challenge(tmp_path):
     assert stored[0].code_hash != second.json()["code"]
 
 
+def test_login_issues_refresh_cookie_and_refresh_rotates_session(tmp_path):
+    app, db = _app(tmp_path)
+    _seed_user(db)
+    original = api_deps._db
+    api_deps.set_db(db)
+
+    async def scenario():
+        async with _client(app) as client:
+            login = await client.post(
+                "/auth/login",
+                json={"email": "session@example.com", "password": "securepassword123"},
+            )
+            access_before = login.cookies.get("access_token")
+            refresh_before = login.cookies.get("refresh_token")
+            csrf = login.cookies.get("csrf_token")
+            refreshed = await client.post(
+                "/auth/refresh", headers={"X-CSRF-Token": csrf}
+            )
+            access_after = refreshed.cookies.get("access_token")
+            refresh_after = refreshed.cookies.get("refresh_token")
+            me = await client.get("/auth/me")
+        return (
+            login,
+            refreshed,
+            access_before,
+            refresh_before,
+            access_after,
+            refresh_after,
+            me,
+        )
+
+    try:
+        (
+            login,
+            refreshed,
+            access_before,
+            refresh_before,
+            access_after,
+            refresh_after,
+            me,
+        ) = _run(scenario())
+    finally:
+        api_deps._db = original
+        _run(db.close())
+
+    assert login.status_code == 200
+    assert access_before
+    assert refresh_before
+    assert refreshed.status_code == 200
+    # Rotation issues a brand new access token and refresh token.
+    assert access_after and access_after != access_before
+    assert refresh_after and refresh_after != refresh_before
+    assert me.status_code == 200
+    assert me.json()["email"] == "session@example.com"
+
+
+def test_refresh_endpoint_rejects_access_token_as_refresh_token(tmp_path):
+    app, db = _app(tmp_path)
+    _seed_user(db)
+    original = api_deps._db
+    api_deps.set_db(db)
+
+    async def scenario():
+        async with _client(app) as client:
+            login = await client.post(
+                "/auth/login",
+                json={"email": "session@example.com", "password": "securepassword123"},
+            )
+            access_token = login.cookies.get("access_token")
+            # Present the access token where only a refresh token is valid.
+            client.cookies.clear()
+            return await client.post(
+                "/auth/refresh",
+                headers={"Cookie": f"refresh_token={access_token}"},
+            )
+
+    try:
+        rejected = _run(scenario())
+    finally:
+        api_deps._db = original
+        _run(db.close())
+
+    assert rejected.status_code == 401
+
+
+def test_logout_revokes_refresh_token(tmp_path):
+    app, db = _app(tmp_path)
+    _seed_user(db)
+    original = api_deps._db
+    api_deps.set_db(db)
+
+    async def scenario():
+        async with _client(app) as client:
+            login = await client.post(
+                "/auth/login",
+                json={"email": "session@example.com", "password": "securepassword123"},
+            )
+            refresh_token = login.cookies.get("refresh_token")
+            csrf = login.cookies.get("csrf_token")
+            logout = await client.post(
+                "/auth/logout", headers={"X-CSRF-Token": csrf}
+            )
+            client.cookies.clear()
+            rejected = await client.post(
+                "/auth/refresh",
+                headers={"Cookie": f"refresh_token={refresh_token}"},
+            )
+        return logout, rejected
+
+    try:
+        logout, rejected = _run(scenario())
+    finally:
+        api_deps._db = original
+        _run(db.close())
+
+    assert logout.status_code == 200
+    # Logout bumps token_version, so the refresh token cannot mint a new session.
+    assert rejected.status_code == 401
+
+
+def test_refresh_without_cookie_is_rejected(tmp_path):
+    app, db = _app(tmp_path)
+    original = api_deps._db
+    api_deps.set_db(db)
+
+    async def scenario():
+        async with _client(app) as client:
+            return await client.post("/auth/refresh")
+
+    try:
+        rejected = _run(scenario())
+    finally:
+        api_deps._db = original
+        _run(db.close())
+
+    assert rejected.status_code == 401
+
+
 def test_production_cookie_flags_are_configurable():
     settings = Settings(cookie_secure=True, cookie_samesite="strict")
     assert settings.cookie_secure is True

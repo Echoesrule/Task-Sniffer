@@ -3,6 +3,8 @@
 import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { applicationsService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
+import { RequireAuth } from "@/components/auth/require-auth"
 import { motion } from "framer-motion"
 import { Building2, Clock, GripVertical, AlertCircle, RefreshCw } from "lucide-react"
 import { timeAgo } from "@/lib/utils"
@@ -20,6 +22,7 @@ const columns = [
 ]
 
 export default function ApplicationsPage() {
+  const { status } = useAuth()
   const [apps, setApps] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [savingId, setSavingId] = useState<string | null>(null)
@@ -45,7 +48,7 @@ export default function ApplicationsPage() {
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { if (status === "authenticated") void load() }, [load, status])
 
   const moveApplication = async (appId: string, status: string) => {
     const previous = apps
@@ -63,6 +66,8 @@ export default function ApplicationsPage() {
       setDragOverCol(null)
     }
   }
+
+  if (status !== "authenticated") return <RequireAuth>{null}</RequireAuth>
 
   return (
     <div className="min-h-screen bg-background flex">

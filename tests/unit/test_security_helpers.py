@@ -12,6 +12,12 @@ import pytest
 import backend.security.rate_limit as rate_limit_module
 import backend.sources.urls as urls_module
 from backend.api.routes.sources import _redact_error, _safe_url
+from backend.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_access_token,
+    decode_refresh_token,
+)
 from backend.services.ingestion import IngestionEngine
 
 
@@ -47,6 +53,27 @@ def test_redact_error_is_bounded():
     cleaned = _redact_error("x" * 2000)
     assert cleaned is not None
     assert len(cleaned) == 500
+
+
+def test_access_and_refresh_tokens_are_not_interchangeable():
+    claims = {"sub": "user@example.com", "user_id": "user-1"}
+    access = create_access_token(claims, token_version=3)
+    refresh = create_refresh_token(claims, token_version=3)
+
+    assert decode_access_token(access) is not None
+    assert decode_refresh_token(access) is None
+    assert decode_refresh_token(refresh) is not None
+    assert decode_access_token(refresh) is None
+
+    # Both token types carry the revocation version used by logout.
+    assert decode_access_token(access)["ver"] == 3
+    assert decode_refresh_token(refresh)["ver"] == 3
+
+
+def test_refresh_token_rejects_tampered_signature():
+    refresh = create_refresh_token({"sub": "user@example.com"})
+    tampered = refresh[:-1] + ("A" if refresh[-1] != "A" else "B")
+    assert decode_refresh_token(tampered) is None
 
 
 @pytest.mark.parametrize(

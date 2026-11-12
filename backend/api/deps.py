@@ -16,6 +16,9 @@ from backend.security import decode_access_token
 _db: Database | None = None
 
 ACCESS_COOKIE_NAME = "access_token"
+REFRESH_COOKIE_NAME = "refresh_token"
+# Scope the refresh cookie to auth routes so it is not attached to API calls.
+REFRESH_COOKIE_PATH = "/auth"
 
 
 def set_db(db: Database) -> None:

@@ -7,6 +7,8 @@ import { User, Save, X, Plus, AlertCircle, MessageCircle } from "lucide-react"
 import { useState, useEffect } from "react"
 import { useToast } from "@/components/ui/toast"
 import { authService, candidateService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
+import { RequireAuth } from "@/components/auth/require-auth"
 
 type ProfileForm = {
   name: string; email: string; preferred_roles: string[]; skills: string[];
@@ -16,6 +18,7 @@ type ProfileForm = {
 
 export default function SettingsPage() {
   const { toast } = useToast()
+  const { status } = useAuth()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -37,6 +40,7 @@ export default function SettingsPage() {
   const [linkBusy, setLinkBusy] = useState(false)
 
   useEffect(() => {
+    if (status !== "authenticated") return
     let cancelled = false
     Promise.all([authService.me(), candidateService.getProfile()]).then(([user, p]) => {
       if (!cancelled) setProfile({
@@ -53,7 +57,7 @@ export default function SettingsPage() {
       } else setLoadError(e?.message || "Could not load profile")
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [status])
 
   const addRole = () => {
     const r = roleInput.trim()
@@ -103,6 +107,8 @@ export default function SettingsPage() {
       setLinkBusy(false)
     }
   }
+
+  if (status !== "authenticated") return <RequireAuth>{null}</RequireAuth>
 
   return (
     <div className="min-h-screen bg-background flex">

@@ -6,13 +6,17 @@ risks that remain open. Operational procedures live in
 
 ## Implemented controls
 
-- **Authentication and sessions** — passwords use bcrypt with a minimum length
-  and complexity policy; login, registration, and Telegram link attempts are
-  rate limited (Redis-backed across workers in production, fail-closed when the
-  backend is unavailable). Browser clients use an HttpOnly session cookie with
-  a double-submit CSRF token; API clients may use bearer tokens. Access tokens
+- **Authentication and sessions** — passwords use PBKDF2-SHA256 (with bcrypt
+  verification support for existing hashes) and a minimum length and complexity
+  policy; login, registration, and Telegram link attempts are rate limited
+  (Redis-backed across workers in production, fail-closed when the backend is
+  unavailable). Browser clients use an HttpOnly session cookie with a
+  double-submit CSRF token; API clients may use bearer tokens. Access tokens
   default to 15 minutes and carry a per-user `token_version` so logout and
-  password changes revoke previously issued tokens.
+  password changes revoke previously issued tokens. A separate HttpOnly refresh
+  token (7 days, scoped to `/auth`) renews access tokens without re-login; it is
+  rotated on every refresh and is rejected anywhere an access token is expected.
+  Logging out increments `token_version`, which invalidates both token types.
 - **Authorization** — registration always creates the `user` role and rejects
   client-supplied roles. Source ingestion controls, source error details, and
   job risk analysis require the web `admin` role; global Telegram commands
@@ -71,6 +75,13 @@ risks that remain open. Operational procedures live in
    - A bare-metal SQLite deployment must restrict `.env`, the database file,
      Telegram persistence, and CV storage to the service account. The Compose
      deployment uses named volumes instead.
+
+6. **Refresh-token replay**
+   - Refresh tokens are stateless JWTs. Each refresh rotates the cookie, but the
+     previous token is not tracked server-side, so a stolen copy remains usable
+     until it expires or `token_version` changes (logout/password change).
+   - Mitigation: add a server-side refresh-token family/jti store with reuse
+     detection before treating the 7-day lifetime as a hard revocation window.
 
 ## Verification
 

@@ -4,6 +4,8 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { StatCard } from "@/components/ui/stat-card"
 import { analyticsService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
+import { RequireAuth } from "@/components/auth/require-auth"
 import { motion } from "framer-motion"
 import { Send, CalendarCheck, Trophy, TrendingUp, AlertCircle } from "lucide-react"
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts"
@@ -12,11 +14,13 @@ import { useEffect, useState } from "react"
 const matchColors = ["#00d68f", "#6c5ce7", "#ffaa00", "#ff3d71"]
 
 export default function AnalyticsPage() {
+  const { status } = useAuth()
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (status !== "authenticated") return
     let cancelled = false
     Promise.all([
       analyticsService.overview(), analyticsService.matches(),
@@ -26,7 +30,7 @@ export default function AnalyticsPage() {
     }).catch((e: any) => { if (!cancelled) setError(e?.message || "Could not load analytics") })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [status])
 
   const funnel = data?.funnel
   const funnelItems = funnel ? [
@@ -42,6 +46,8 @@ export default function AnalyticsPage() {
   const sources = (data?.sources || []).map((s: any) => ({ name: s.source, jobs: s.total_jobs, applications: s.application_count }))
   const interviews = funnel?.interview || 0
   const applied = funnel?.applied || 0
+
+  if (status !== "authenticated") return <RequireAuth>{null}</RequireAuth>
 
   return (
     <div className="min-h-screen bg-background flex">

@@ -3,6 +3,8 @@
 import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { candidateService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
+import { RequireAuth } from "@/components/auth/require-auth"
 import { motion } from "framer-motion"
 import { FileText, Shield, Upload, Trash2, Download, AlertCircle, Loader2 } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -10,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 type CvInfo = { filename: string | null; size: number | null }
 
 export default function CVPage() {
+  const { status } = useAuth()
   const inputRef = useRef<HTMLInputElement>(null)
   const [cv, setCv] = useState<CvInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -22,7 +25,7 @@ export default function CVPage() {
     catch (e: any) { setError(e?.message || "Could not load CV details") }
     finally { setLoading(false) }
   }, [])
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { if (status === "authenticated") void load() }, [load, status])
 
   const upload = async (file?: File) => {
     if (!file) return
@@ -53,6 +56,8 @@ export default function CVPage() {
     catch (e: any) { setError(e?.message || "CV deletion failed") }
     finally { setBusy(false) }
   }
+
+  if (status !== "authenticated") return <RequireAuth>{null}</RequireAuth>
 
   return (
     <div className="min-h-screen bg-background flex">

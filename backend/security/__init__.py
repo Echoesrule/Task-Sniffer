@@ -98,13 +98,57 @@ def create_access_token(
     return jwt.encode(to_encode, settings.secret_key, algorithm=ALGORITHM)
 
 
+def create_refresh_token(
+    data: dict,
+    expires_delta: Optional[timedelta] = None,
+    *,
+    token_version: int = 0,
+) -> str:
+    """Issue a long-lived refresh token that can only mint access tokens.
+
+    Refresh tokens carry ``typ="refresh"`` so they are rejected anywhere an
+    access token is expected, including the Authorization header.
+    """
+    if not settings.secret_key:
+        raise RuntimeError("SECRET_KEY must be configured to generate tokens")
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(days=settings.refresh_token_expire_days)
+    )
+    to_encode.update(
+        {
+            "exp": expire,
+            "ver": int(token_version),
+            "jti": secrets.token_urlsafe(16),
+            "typ": "refresh",
+        }
+    )
+    return jwt.encode(to_encode, settings.secret_key, algorithm=ALGORITHM)
+
+
 def decode_access_token(token: str) -> Optional[dict]:
     if not settings.secret_key or not token:
         return None
     try:
-        return jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
     except JWTError:
         return None
+    # A refresh token must never be usable as a bearer access token.
+    if payload.get("typ") == "refresh":
+        return None
+    return payload
+
+
+def decode_refresh_token(token: str) -> Optional[dict]:
+    if not settings.secret_key or not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("typ") != "refresh":
+        return None
+    return payload
 
 
 def generate_csrf_token() -> str:

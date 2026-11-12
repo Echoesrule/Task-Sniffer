@@ -141,15 +141,25 @@ subject to CSRF checks.
 
 - The access cookie is `HttpOnly` and `SameSite` configurable via
   `COOKIE_SAMESITE` (`lax` by default). Set `COOKIE_SECURE=true` behind HTTPS.
-- Access tokens default to 15 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`). Logging
-  out increments the user's `token_version`, so previously issued tokens stop
-  working even if a copy was captured.
+- Access tokens default to 15 minutes (`ACCESS_TOKEN_EXPIRE_MINUTES`). When one
+  expires, the frontend calls `POST /auth/refresh` once and retries the failed
+  request; a second failure emits `auth:unauthorized` and the UI returns to
+  `/login`. Refresh attempts for concurrent requests are coalesced.
+- A separate `refresh_token` cookie is `HttpOnly`, lasts 7 days
+  (`REFRESH_TOKEN_EXPIRE_DAYS`), and is scoped to `Path=/auth` so it is not sent
+  with normal API calls. Each refresh rotates both the access and refresh
+  cookies. Refresh tokens carry `typ=refresh` and are rejected by the access
+  token decoder (and vice versa).
+- Logging out increments the user's `token_version`, so previously issued
+  access and refresh tokens stop working even if a copy was captured.
 - Cookie-authenticated unsafe methods (`POST`, `PUT`, `PATCH`, `DELETE`) must
   send the double-submit token: the `csrf_token` cookie value in the
   `X-CSRF-Token` header. The frontend reads the cookie and sets the header
-  automatically.
+  automatically, including on `/auth/refresh`.
 - `POST /auth/login` and `POST /auth/register` are exempt from the CSRF check
-  because they establish or bootstrap the session.
+  because they establish or bootstrap the session. `POST /auth/refresh` is not
+  exempt: when the access cookie is still present, the browser must send the
+  CSRF header.
 - CORS uses explicit origins from `CORS_ORIGINS` with credentials enabled.
   Wildcard origins are not used.
 

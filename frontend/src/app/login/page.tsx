@@ -1,18 +1,31 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { authService } from "@/services/api"
+import { useAuth } from "@/components/auth/auth-provider"
 import { Radar, AlertCircle } from "lucide-react"
+
+function nextPath(): string {
+  if (typeof window === "undefined") return "/dashboard"
+  const next = new URLSearchParams(window.location.search).get("next")
+  // Only allow same-origin paths so ?next= cannot become an open redirect.
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard"
+}
 
 export default function LoginPage() {
   const router = useRouter()
+  const { status, refresh } = useAuth()
   const [mode, setMode] = useState<"login" | "register">("login")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (status === "authenticated") router.replace(nextPath())
+  }, [status, router])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -20,7 +33,8 @@ export default function LoginPage() {
     try {
       if (mode === "login") await authService.login(email, password)
       else await authService.register(email, password)
-      router.replace("/dashboard")
+      // Populate the shared auth state; the effect above performs the redirect.
+      await refresh()
     } catch (err: any) { setError(err?.message || "Could not authenticate") }
     finally { setBusy(false) }
   }
