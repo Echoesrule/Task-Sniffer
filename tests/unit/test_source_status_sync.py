@@ -63,7 +63,9 @@ def test_source_api_uses_registry_eligibility_not_stale_database_flag(tmp_path, 
                 Source(name="active", url="https://active.example", enabled=False),
             ])
             await session.commit()
-            response = await sources_api.list_sources(session)
+            response = await sources_api.list_sources(
+                session, current_user={"role": "admin", "user_id": "test"}
+            )
             result = {source.name: source for source in response.sources}
         await db.close()
         return result

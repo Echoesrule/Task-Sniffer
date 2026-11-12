@@ -3,7 +3,7 @@
 import { Sidebar } from "@/components/layout/sidebar"
 import { Header } from "@/components/layout/header"
 import { motion } from "framer-motion"
-import { User, Save, X, Plus, AlertCircle } from "lucide-react"
+import { User, Save, X, Plus, AlertCircle, MessageCircle } from "lucide-react"
 import { useState, useEffect } from "react"
 import { useToast } from "@/components/ui/toast"
 import { authService, candidateService } from "@/services/api"
@@ -33,6 +33,8 @@ export default function SettingsPage() {
   const [roleInput, setRoleInput] = useState("")
   const [skillInput, setSkillInput] = useState("")
   const [saving, setSaving] = useState(false)
+  const [linkCode, setLinkCode] = useState<{ code: string; expires_at: string } | null>(null)
+  const [linkBusy, setLinkBusy] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -88,6 +90,17 @@ export default function SettingsPage() {
       toast(e?.message || "Failed to save", "error")
     } finally {
       setSaving(false)
+    }
+  }
+
+  const generateLinkCode = async () => {
+    setLinkBusy(true)
+    try {
+      setLinkCode(await authService.createTelegramLinkCode())
+    } catch (e: any) {
+      toast(e?.message || "Could not generate a linking code", "error")
+    } finally {
+      setLinkBusy(false)
     }
   }
 
@@ -167,6 +180,28 @@ export default function SettingsPage() {
                 ))}
               </div>
             </div>
+          </motion.section>
+
+          <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+            className="bg-surface border border-border rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <MessageCircle className="w-4 h-4 text-accent" />
+              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider">Telegram</h2>
+            </div>
+            <p className="text-sm text-text-secondary mb-3">
+              Generate a short-lived, single-use code, then send <code className="text-accent">/link CODE</code> to the bot.
+              Your password is never sent through Telegram.
+            </p>
+            <button onClick={generateLinkCode} disabled={linkBusy} className="flex items-center gap-2 bg-surface-2 hover:bg-surface-3 disabled:opacity-50 border border-border text-text-primary text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+              <MessageCircle className="w-4 h-4" /> {linkBusy ? "Generating..." : "Generate linking code"}
+            </button>
+            {linkCode && (
+              <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4">
+                <p className="text-xs text-text-muted mb-1">Your one-time code</p>
+                <p className="text-2xl font-mono tracking-widest text-accent">{linkCode.code}</p>
+                <p className="text-xs text-text-muted mt-1">Expires {new Date(linkCode.expires_at).toLocaleString()}.</p>
+              </div>
+            )}
           </motion.section>
 
           <button onClick={saveProfile} disabled={saving} className="flex items-center gap-2 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">

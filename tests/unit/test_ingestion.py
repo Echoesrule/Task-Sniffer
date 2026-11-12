@@ -276,6 +276,55 @@ def test_force_cannot_bypass_access_policy_or_disabled_state():
     assert disabled.error_messages and "source disabled" in disabled.error_messages[0]
 
 
+def test_paused_source_is_not_ingested_by_scheduler_even_when_forced(tmp_path):
+    """The persisted pause state overrides the in-memory registry and force."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'paused.db'}")
+    _run(db.init_db())
+
+    async def scenario():
+        engine = _engine_with(db)
+        engine._registry.register(_approved("fakesrc"))
+        async with db.async_session_factory() as session:
+            session.add(
+                Source(
+                    name="fakesrc",
+                    url="https://fake.example.com",
+                    source_status="PAUSED",
+                    pause_reason="MANUAL",
+                )
+            )
+            await session.commit()
+
+        paused_result = await engine.run_source("fakesrc", force=True)
+        async with db.async_session_factory() as session:
+            jobs_while_paused = (
+                await session.execute(select(sa_func.count(Job.id)))
+            ).scalar_one()
+            row = (
+                await session.execute(select(Source).where(Source.name == "fakesrc"))
+            ).scalar_one()
+            row.source_status = "ACTIVE"
+            row.pause_reason = None
+            row.retry_at = None
+            await session.commit()
+
+        resumed_result = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            jobs_after_resume = (
+                await session.execute(select(sa_func.count(Job.id)))
+            ).scalar_one()
+        return paused_result, jobs_while_paused, resumed_result, jobs_after_resume
+
+    paused, jobs_while_paused, resumed, jobs_after_resume = _run(scenario())
+    _run(db.close())
+
+    assert paused.paused is True
+    assert paused.pause_reason == "MANUAL"
+    assert jobs_while_paused == 0
+    assert resumed.paused is False
+    assert jobs_after_resume > 0
+
+
 def test_run_source_error_isolation(tmp_path):
     """A failing job never aborts the source run; errors are recorded."""
 

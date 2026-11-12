@@ -182,17 +182,32 @@ async def request_with_redirect(
 
     Returns (raw_text, final_url, redirect_chain). Validation helper returns
     None raw text when the page fails the checklist.
+
+    Every redirect hop is fetched through
+    :func:`backend.sources.urls.fetch_with_policy`, so intermediate targets are
+    checked against the SSRF policy before a request is issued.
     """
-    from backend.sources.urls import resolve_redirects
+    from backend.sources.urls import fetch_with_policy
 
-    chain: RedirectChain = await resolve_redirects(client, url)
-    if chain.status >= 300 or chain.status in (404, 410):
-        logger.info("job URL dead (%s) %s", chain.status, url)
-        return None, chain.final_url, chain
+    response, final_url, hops, error = await fetch_with_policy(client, url)
+    status = response.status_code if response is not None else 0
+    chain = RedirectChain(
+        original_url=url,
+        final_url=final_url,
+        chain=hops,
+        status=status,
+    )
 
-    if not chain.final_url:
-        return None, url, chain
+    if error:
+        logger.info("job URL fetch refused/failed (%s) %s: %s", status, url, error)
+        return None, final_url, chain
 
-    response = await client.get(chain.final_url)
-    text = response.text if response.status_code == 200 else None
-    return text, chain.final_url, chain
+    if status >= 300 or status in (404, 410):
+        logger.info("job URL dead (%s) %s", status, url)
+        return None, final_url, chain
+
+    if response is None:
+        return None, final_url, chain
+
+    text = response.text if status == 200 else None
+    return text, final_url, chain

@@ -10,7 +10,7 @@ from sqlalchemy import select, func as sa_func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.api.deps import get_current_user, get_db, get_optional_current_user
+from backend.api.deps import get_db, get_optional_current_user, require_admin
 from backend.api.schemas import (
     JobListResponse,
     JobResponse,
@@ -216,7 +216,7 @@ async def search_jobs(
 async def analyze_job(
     job_id: str,
     db: AsyncSession = Depends(get_db),
-    _user: dict = Depends(get_current_user),
+    _user: dict = Depends(require_admin),
 ) -> JobResponse:
     result = await db.execute(select(Job).options(selectinload(Job.source)).where(Job.id == job_id))
     job = result.scalars().first()

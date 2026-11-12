@@ -48,7 +48,16 @@ def create_bot_app() -> Application:
         raise ValueError("TELEGRAM_BOT_TOKEN not set in .env")
 
     persistence_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "tg_persistence.pkl")
-    os.makedirs(os.path.dirname(persistence_path), exist_ok=True)
+    persistence_dir = os.path.dirname(persistence_path)
+    os.makedirs(persistence_dir, exist_ok=True)
+    # Bot state is pickle-backed; restrict it to the service account so another
+    # local user cannot replace it with a malicious payload.
+    try:
+        os.chmod(persistence_dir, 0o700)
+        if os.path.exists(persistence_path):
+            os.chmod(persistence_path, 0o600)
+    except OSError:
+        pass
     persistence = PicklePersistence(filepath=persistence_path)
 
     application = (

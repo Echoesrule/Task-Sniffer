@@ -10,7 +10,15 @@ from sqlalchemy import select
 
 from backend.api import deps as api_deps
 from backend.api.routes import analytics, applications
-from backend.models.database import Application, Candidate, Database, Job, Source, User
+from backend.models.database import (
+    Application,
+    Candidate,
+    CandidateJobScore,
+    Database,
+    Job,
+    Source,
+    User,
+)
 from backend.security import create_access_token, hash_password
 
 
@@ -101,8 +109,22 @@ def test_application_creation_uses_user_id_not_contact_email(tmp_path):
             session.add_all([user, source])
             await session.flush()
             candidate = Candidate(user_id=user.id, name="Account holder", email="contact@example.com")
-            job = Job(source_id=source.id, source_job_id="job", title="Engineer", company="Acme")
+            job = Job(
+                source_id=source.id,
+                source_job_id="job",
+                title="Engineer",
+                company="Acme",
+                risk_score=12.5,
+            )
             session.add_all([candidate, job])
+            await session.flush()
+            session.add(
+                CandidateJobScore(
+                    candidate_id=candidate.id,
+                    job_id=job.id,
+                    score=0.77,
+                )
+            )
             await session.commit()
             return user.id, job.id
 
@@ -115,25 +137,40 @@ def test_application_creation_uses_user_id_not_contact_email(tmp_path):
 
     async def request():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            return await client.post(
+            forged = await client.post(
                 "/applications", headers={"Authorization": f"Bearer {token}"},
-                json={"job_id": job_id, "risk_score": 35},
+                json={"job_id": job_id, "risk_score": 0},
             )
+            created = await client.post(
+                "/applications", headers={"Authorization": f"Bearer {token}"},
+                json={"job_id": job_id},
+            )
+            return forged, created
 
     try:
-        response = _run(request())
+        forged, response = _run(request())
+        assert forged.status_code == 422  # client-supplied scores are rejected
         assert response.status_code == 201
         assert response.json()["company"] == "Acme"
+        # Scores are derived from the candidate score record and job risk.
+        assert response.json()["match_score"] == 0.77
+        assert response.json()["risk_score"] == 12.5
     finally:
         api_deps._db = old_db
         _run(db.close())
 
 
-def test_production_settings_require_signing_and_cv_encryption_keys():
+def test_production_settings_require_signing_and_cv_encryption_keys(monkeypatch):
     import base64
+    import secrets
     import pytest
     from pydantic import ValidationError
     from backend.config import Settings
+
+    # Collection of root-level scripts can load a developer .env into the
+    # process environment. This test asserts the production rule that the key
+    # must come from the process environment, so start from a clean slate.
+    monkeypatch.delenv("SECRET_KEY", raising=False)
 
     with pytest.raises(ValidationError):
         Settings(app_env="production", secret_key="")
@@ -143,7 +180,16 @@ def test_production_settings_require_signing_and_cv_encryption_keys():
         Settings(app_env="production", secret_key="too-short")
     with pytest.raises(ValidationError):
         Settings(app_env="production", secret_key="s" * 48)
-    encryption_key = base64.urlsafe_b64encode(b"e" * 32).decode()
-    configured = Settings(app_env="production", secret_key="s" * 48, encryption_key=encryption_key)
+    with pytest.raises(ValidationError):
+        # A high-entropy secret supplied through .env rather than the process
+        # environment is rejected in production.
+        Settings(app_env="production", secret_key=secrets.token_urlsafe(48))
+
+    signing_key = secrets.token_urlsafe(48)
+    monkeypatch.setenv("SECRET_KEY", signing_key)
+    encryption_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+    configured = Settings(
+        app_env="production", secret_key=signing_key, encryption_key=encryption_key
+    )
     assert configured.encryption_key == encryption_key
     assert Settings(app_env="development", secret_key="").secret_key != "change-me"

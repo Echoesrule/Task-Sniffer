@@ -213,8 +213,10 @@ class ApplicationCreate(BaseModel):
 
     job_id: str = Field(..., description="Job identifier to apply for")
     notes: str = Field("", description="Optional notes about the application")
-    match_score: float | None = Field(None, ge=0.0, le=1.0, description="Pre-computed match score")
-    risk_score: float | None = Field(None, ge=0.0, le=100.0, description="Pre-computed risk score (0-100)")
+
+    # Scores are computed server-side from the candidate's own score record and
+    # the job's risk assessment; they are never accepted from the client.
+    model_config = {"extra": "forbid"}
 
 
 class ApplicationUpdate(BaseModel):

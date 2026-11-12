@@ -51,18 +51,28 @@ Dashboard: http://localhost:3000
 
 ```bash
 cp .env.example .env
-# For Docker Compose, set POSTGRES_PASSWORD, SECRET_KEY and ENCRYPTION_KEY, then set
-# DATABASE_URL / DATABASE_URL_SYNC to PostgreSQL URLs using host `db`.
+# For Docker Compose, set POSTGRES_USER, POSTGRES_PASSWORD, REDIS_PASSWORD,
+# SECRET_KEY and ENCRYPTION_KEY, then set DATABASE_URL / DATABASE_URL_SYNC to
+# PostgreSQL URLs using host `db`.
 docker compose up -d
+
+# Provision the first administrator (registration only creates regular users)
+docker compose exec api python scripts/create_admin.py --email admin@example.com
 ```
 
-The Compose stack refuses to start without database credentials, a JWT signing
-key and the CV encryption key. Generate `SECRET_KEY` with
-`python -c 'import secrets; print(secrets.token_urlsafe(48))'`. Generate
+The Compose stack refuses to start without database credentials, a Redis
+password, a JWT signing key and the CV encryption key. Generate `SECRET_KEY`
+with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`. Generate
 `ENCRYPTION_KEY` with
 `python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'`.
 Keep both values in a deployment secret manager and retain the CV key backups
 separately; losing the CV key makes encrypted documents unrecoverable.
+
+PostgreSQL and Redis are not published on host ports; they are reachable only
+on the Compose network. The runtime image runs as unprivileged UID `10001` and
+contains no build toolchain. See
+[`docs/security-operations.md`](docs/security-operations.md) for secret
+generation, key rotation, administrator provisioning, and deployment hardening.
 
 New CV uploads are encrypted with AES-256-GCM before they are written to the
 persistent `cv_data` volume. Before upgrading an installation with existing CVs,
@@ -177,6 +187,8 @@ The bot runs automatically with the API server. No separate process needed.
 | `/stop` | Unsubscribe |
 | `/top` | View top 5 highest-match jobs |
 | `/search <query>` | Search by title/company/skills |
+| `/link <code>` | Link with a one-time code from the web app |
+| `/unlink` | Unlink the web account |
 | `/apply <job_id>` | Track an application |
 | `/my_applications` | List your tracked apps |
 | `/update_status <id> <status>` | Change app status |
@@ -184,8 +196,12 @@ The bot runs automatically with the API server. No separate process needed.
 | `/set_keywords python,react` | Set match keywords |
 | `/set_exclude intern,junior` | Set exclusions |
 | `/set_salary 200000` | Set min salary (KES) |
-| `/stats` | Job statistics |
-| `/sources` | List active sources |
+| `/stats` | Job statistics (admin chats only) |
+| `/sources` | List active sources (admin chats only) |
+
+Passwords are never accepted through Telegram. Generate a short-lived,
+single-use code in **Settings → Telegram** and send `/link <code>`. Global
+`/stats` and `/sources` are restricted to `TELEGRAM_ADMIN_CHAT_IDS`.
 
 ### Automated Alerts
 
@@ -224,7 +240,13 @@ All config via environment variables. See `.env.example`.
 |----------|---------|-------------|
 | `DATABASE_URL` | `sqlite+aiosqlite:///./work_bot_hunter.db` | Database connection |
 | `TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather |
-| `SECRET_KEY` | `change-me` | JWT signing key |
+| `SECRET_KEY` | ephemeral in development | JWT signing key; required in production |
+| `ENCRYPTION_KEY` | — | AES-256-GCM key for CV files; required in production |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access-token lifetime |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated browser origins |
+| `COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
+| `COOKIE_SAMESITE` | `lax` | Session cookie SameSite policy |
+| `TELEGRAM_ADMIN_CHAT_IDS` | — | Chat IDs allowed to run global bot commands |
 | `SCRAPE_INTERVAL_MINUTES` | `60` | How often to scrape |
 | `REQUEST_DELAY_SECONDS` | `2` | Delay between requests |
 | `WEIGHT_SKILLS` | `0.30` | Skill match weight |
@@ -232,17 +254,31 @@ All config via environment variables. See `.env.example`.
 | `RISK_BLOCK` | `70` | Risk score to block |
 | `RISK_REVIEW` | `40` | Risk score to flag |
 
-CV uploads are stored as files under `CV_STORAGE_PATH`. The application does
-not encrypt those files itself; configure encrypted storage at the host or
-volume layer if that is required by the deployment.
+CV uploads are encrypted with AES-256-GCM under `CV_STORAGE_PATH`. The key comes
+from `ENCRYPTION_KEY` and must be backed up separately from the database.
+
+## Security
+
+Browser sessions use HttpOnly cookies with a double-submit CSRF token; API
+clients can still use bearer tokens. Login, registration, and Telegram linking
+are rate limited (Redis-backed in production). Source ingestion controls,
+source error details, and shared job risk analysis require the `admin` role.
+Registration never grants a role, and Telegram `/link` uses short-lived
+single-use codes instead of passwords.
+
+See [`docs/security-operations.md`](docs/security-operations.md) for secret
+generation, key rotation, administrator provisioning, and deployment hardening.
 
 ## Running Tests
 
 ```bash
-# Unit tests
+# Full suite (unit + integration)
+pytest -q
+
+# Unit tests only
 pytest tests/unit/ -v
 
-# Integration test (full pipeline)
+# Legacy end-to-end pipeline script
 python test_integration.py
 ```
 
@@ -256,21 +292,15 @@ python test_integration.py
 
 ## Environment Variables
 
-```bash
-# Database (SQLite for local dev)
-DATABASE_URL=sqlite+aiosqlite:///./work_bot_hunter.db
+All configuration is read from environment variables. Start from
+[`.env.example`](.env.example); it documents every supported setting, including
+secret generation commands, session cookies, CORS, rate limits, and Telegram
+admin chat IDs. Never commit a populated `.env`.
 
-# Telegram
-TELEGRAM_BOT_TOKEN=your-bot-token
-TELEGRAM_CHAT_ID=your-chat-id
-
-# Auth
-SECRET_KEY=your-secret-key
-
-# Scraping
-SCRAPE_INTERVAL_MINUTES=60
-REQUEST_DELAY_SECONDS=2
-```
+In production, `SECRET_KEY` must be supplied through the process environment or
+a secret manager, and `ENCRYPTION_KEY` must be a URL-safe base64 encoding of
+exactly 32 random bytes. See
+[`docs/security-operations.md`](docs/security-operations.md).
 
 ## License
 

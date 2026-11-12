@@ -18,6 +18,7 @@ to ``ingestion_errors``. On sustained rate-limiting the source is paused.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -52,6 +53,21 @@ from backend.sources.urls import (
 
 
 logger = logging.getLogger(__name__)
+
+# Per-process, per-event-loop source locks shared by every engine instance.
+# The API constructs a fresh engine per request, so an instance-level lock would
+# not prevent two concurrent HTTP runs of the same source from overlapping.
+_RUN_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _run_lock(name: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (id(loop), name)
+    lock = _RUN_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RUN_LOCKS[key] = lock
+    return lock
 
 
 def _safe_error_message(exc: Exception) -> str:
@@ -151,6 +167,20 @@ class IngestionEngine:
         limit: int | None = None,
         on_job: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> SourceRunResult:
+        lock = _run_lock(name)
+        async with lock:
+            return await self._run_source_unlocked(
+                name, force=force, limit=limit, on_job=on_job
+            )
+
+    async def _run_source_unlocked(
+        self,
+        name: str,
+        *,
+        force: bool = False,
+        limit: int | None = None,
+        on_job: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
+    ) -> SourceRunResult:
         self._candidates = None
         started = utcnow()
         limit = limit or self.max_jobs_per_source
@@ -162,6 +192,39 @@ class IngestionEngine:
             result.error_messages.append(f"source '{name}' not registered")
             result.finished_at = utcnow().isoformat()
             return result
+
+        # The database row is authoritative for operator pause state. The
+        # in-memory registry cannot observe API pause/resume calls.
+        persisted = None
+        if self._sf is not None:
+            async with self._sf() as session:
+                persisted = (
+                    await session.execute(select(Source).where(Source.name == name))
+                ).scalar_one_or_none()
+        if persisted is not None:
+            pause_reason = (persisted.pause_reason or "").upper()
+            retry_at = persisted.retry_at
+            if retry_at is not None and retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            retry_due = retry_at is not None and retry_at <= datetime.now(timezone.utc)
+            manual_pause = persisted.source_status == "PAUSED" and pause_reason not in {
+                "RATE_LIMITED",
+                "SOURCE_FAILED",
+            }
+            if persisted.source_status == "DISABLED":
+                result.paused = True
+                result.pause_reason = persisted.pause_reason or "DISABLED"
+                result.error_messages.append("source disabled")
+                result.finished_at = utcnow().isoformat()
+                return result
+            if persisted.source_status == "PAUSED" and not retry_due:
+                # Manual pauses are never bypassed, including by force.
+                if manual_pause or not force:
+                    result.paused = True
+                    result.pause_reason = persisted.pause_reason or "PAUSED"
+                    result.error_messages.append("source paused")
+                    result.finished_at = utcnow().isoformat()
+                    return result
 
         refuse = self._registry.refuse_reason(name)
         policy_blocked = config.permission_blocked or config.source_status.value == "DISABLED"

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func as sa_func
 
 from backend.api.deps import set_db
+from backend.api.middleware import CSRFMiddleware
 from backend.api.routes import applications, analytics, auth, candidates, jobs, sources
 from backend.config import get_settings
 from backend.models.database import Database, Source
@@ -122,12 +123,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    settings = get_settings()
+    app.add_middleware(CSRFMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
 
     app.include_router(auth.router, prefix="/auth", tags=["auth"])

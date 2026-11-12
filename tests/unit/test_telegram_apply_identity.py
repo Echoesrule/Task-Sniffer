@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
-from backend.models.database import Database, TelegramUser, User, Candidate, Job, Application
-from backend.security import hash_password
+from backend.models.database import (
+    Database,
+    TelegramLinkCode,
+    TelegramUser,
+    User,
+    Candidate,
+    Job,
+    Application,
+)
+from backend.security import (
+    generate_telegram_link_code,
+    hash_password,
+    hash_telegram_link_code,
+)
 from backend.telegram import handlers
 
 
@@ -87,19 +100,45 @@ def _seed_user(db: Database):
     return _run(_do())
 
 
-def test_link_with_wrong_password(db):
+def _issue_link_code(db: Database, user_id: str) -> str:
+    async def _do():
+        async with db.async_session_factory() as session:
+            code = generate_telegram_link_code()
+            session.add(
+                TelegramLinkCode(
+                    user_id=user_id,
+                    code_hash=hash_telegram_link_code(code),
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                )
+            )
+            await session.commit()
+            return code
+    return _run(_do())
+
+
+def test_link_rejects_invalid_code(db):
     _seed_user(db)
     upd = _Update(chat_id="12345")
-    ctx = _Context(["alice@example.com", "badpass"])
+    ctx = _Context(["WRONGCODE"])
     _run(handlers.link_account(upd, ctx))
     assert upd.message.replies
-    assert "Invalid email or password" in upd.message.replies[-1]
+    assert "Invalid or expired" in upd.message.replies[-1]
+
+
+def test_link_never_accepts_passwords(db):
+    _seed_user(db)
+    upd = _Update(chat_id="12345")
+    ctx = _Context(["alice@example.com", "pass123"])
+    _run(handlers.link_account(upd, ctx))
+    assert upd.message.replies
+    assert "Passwords are never accepted" in upd.message.replies[-1]
 
 
 def test_link_success_creates_relationship(db):
     data = _seed_user(db)
+    code = _issue_link_code(db, data["user_id"])
     upd = _Update(chat_id="12345")
-    ctx = _Context(["alice@example.com", "pass123"])
+    ctx = _Context([code])
     _run(handlers.link_account(upd, ctx))
     assert upd.message.replies
     assert "Linked" in upd.message.replies[-1]
@@ -109,6 +148,17 @@ def test_link_success_creates_relationship(db):
             tg = (await session.execute(select(TelegramUser).where(TelegramUser.chat_id == "12345"))).scalars().first()
             assert tg.candidate_id == data["candidate_id"]
     _run(_check())
+
+
+def test_link_code_is_single_use(db):
+    data = _seed_user(db)
+    code = _issue_link_code(db, data["user_id"])
+    _run(handlers.link_account(_Update(chat_id="12345"), _Context([code])))
+    _run(handlers.unlink_account(_Update(chat_id="12345"), _Context([])))
+
+    replay = _Update(chat_id="12345")
+    _run(handlers.link_account(replay, _Context([code])))
+    assert "Invalid or expired" in replay.message.replies[-1]
 
 
 def test_apply_refuses_unlinked(db):
@@ -122,7 +172,7 @@ def test_apply_refuses_unlinked(db):
 
 def test_apply_tracks_to_linked_candidate_only(db):
     data = _seed_user(db)
-    _run(handlers.link_account(_Update(chat_id="12345"), _Context(["alice@example.com", "pass123"])))
+    _run(handlers.link_account(_Update(chat_id="12345"), _Context([_issue_link_code(db, data["user_id"])])))
 
     upd = _Update(chat_id="12345")
     ctx = _Context(["job1"])
@@ -139,8 +189,8 @@ def test_apply_tracks_to_linked_candidate_only(db):
 
 
 def test_unlink_revokes_access(db):
-    _seed_user(db)
-    _run(handlers.link_account(_Update(chat_id="12345"), _Context(["alice@example.com", "pass123"])))
+    data = _seed_user(db)
+    _run(handlers.link_account(_Update(chat_id="12345"), _Context([_issue_link_code(db, data["user_id"])])))
     _run(handlers.unlink_account(_Update(chat_id="12345"), _Context([])))
 
     upd = _Update(chat_id="12345")
@@ -151,7 +201,7 @@ def test_unlink_revokes_access(db):
 
 def test_my_applications_scoped_to_linked_candidate(db):
     data = _seed_user(db)
-    _run(handlers.link_account(_Update(chat_id="12345"), _Context(["alice@example.com", "pass123"])))
+    _run(handlers.link_account(_Update(chat_id="12345"), _Context([_issue_link_code(db, data["user_id"])])))
     _run(handlers.apply_job(_Update(chat_id="12345"), _Context(["job1"])))
 
     async def _add_other():
@@ -171,3 +221,22 @@ def test_my_applications_scoped_to_linked_candidate(db):
     assert "Your Applications" in text
     # must not list the other candidate's app as if it belongs to linked user (scoped)
     assert text.count("App ID") == 1
+
+
+def test_global_telegram_commands_require_admin_chat(db, monkeypatch):
+    _seed_user(db)
+    denied = _Update(chat_id="12345")
+    _run(handlers.stats(denied, _Context([])))
+    _run(handlers.sources(denied, _Context([])))
+    assert denied.message.replies == ["Administrator access required."] * 2
+
+    monkeypatch.setattr(
+        handlers,
+        "get_settings",
+        lambda: SimpleNamespace(telegram_admin_chat_id_set={"12345"}),
+    )
+    allowed = _Update(chat_id="12345")
+    _run(handlers.stats(allowed, _Context([])))
+    _run(handlers.sources(allowed, _Context([])))
+    assert "Task Sniffer Stats" in allowed.message.replies[0]
+    assert "No sources configured" in allowed.message.replies[1]
