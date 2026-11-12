@@ -13,7 +13,7 @@ import httpx
 from sqlalchemy import select
 
 from backend.models.database import Database, Job
-from backend.scrapers.adapter import JobSourceAdapter, ListingItem
+from backend.scrapers.adapter import JobSourceAdapter, ListingItem, request_with_redirect
 from backend.services.ingestion import IngestionEngine
 from backend.sources.models import (
     AccessMethod,
@@ -561,6 +561,35 @@ def test_dns_resolving_to_private_is_blocked(monkeypatch):
     assert response is None
     assert "unsafe" in error
     assert hits == []
+
+
+def test_request_with_redirect_applies_per_hop_policy(monkeypatch):
+    import backend.sources.urls as urlsmod
+
+    monkeypatch.setattr(urlsmod, "_resolve_host_ips", lambda host: {"93.184.216.34"})
+    urlsmod._DNS_CACHE.clear()
+    hits: list[str] = []
+
+    def handler(request):
+        url = str(request.url)
+        hits.append(url)
+        if url.endswith("/start"):
+            return httpx.Response(302, headers={"location": "http://10.0.0.5/step"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=VALID_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+    async def go():
+        try:
+            return await request_with_redirect(client, "https://real-ats.net/start")
+        finally:
+            await client.aclose()
+
+    text, final_url, chain = _run(go())
+    assert text is None
+    assert final_url == "http://10.0.0.5/step"
+    assert chain.status == 0
+    assert not any("10.0.0.5" in h for h in hits), "private redirect hop was requested"
 
 
 def test_dns_failure_is_fail_closed_and_not_cached(monkeypatch):

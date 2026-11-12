@@ -16,7 +16,13 @@ from backend.api.schemas import (
     ApplicationStatsResponse,
     ApplicationUpdate,
 )
-from backend.models.database import Application, ApplicationStatusChange, Candidate, Job
+from backend.models.database import (
+    Application,
+    ApplicationStatusChange,
+    Candidate,
+    CandidateJobScore,
+    Job,
+)
 
 router = APIRouter()
 
@@ -110,14 +116,25 @@ async def create_application(
     if existing.scalars().first():
         raise HTTPException(status_code=409, detail="Already applied to this job")
 
+    # Scores are derived server-side. Accepting them from the client would let a
+    # user forge their own match/risk values in analytics and exports.
+    score_row = (
+        await db.execute(
+            select(CandidateJobScore).where(
+                CandidateJobScore.candidate_id == candidate.id,
+                CandidateJobScore.job_id == application.job_id,
+            )
+        )
+    ).scalars().first()
+
     app = Application(
         candidate_id=candidate.id,
         job_id=application.job_id,
         job=job,
         status="shortlisted",
         notes=application.notes,
-        match_score=application.match_score,
-        risk_score=application.risk_score,
+        match_score=score_row.score if score_row else None,
+        risk_score=job.risk_score,
     )
     db.add(app)
     await db.flush()

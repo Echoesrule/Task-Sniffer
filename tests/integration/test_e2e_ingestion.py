@@ -519,16 +519,24 @@ def test_source_mutating_endpoints_require_auth(tmp_path):
 
     async def seed():
         async with db.async_session_factory() as session:
-            user = User(
+            admin = User(
                 email="admin@example.com",
                 hashed_password=hash_password("adminpass123"),
+                role="admin",
                 is_active=True,
             )
-            session.add(user)
+            regular = User(
+                email="user@example.com",
+                hashed_password=hash_password("userpass1234"),
+                role="user",
+                is_active=True,
+            )
+            session.add_all([admin, regular])
             await session.commit()
 
     _run(seed())
-    valid_token = create_access_token({"sub": "admin@example.com"})
+    admin_token = create_access_token({"sub": "admin@example.com"})
+    user_token = create_access_token({"sub": "user@example.com"})
 
     original = api_deps._db
     api_deps.set_db(db)
@@ -537,19 +545,28 @@ def test_source_mutating_endpoints_require_auth(tmp_path):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             no_auth = await client.post("/sources/fakesrc/pause")
-            with_auth = await client.post(
+            as_user = await client.post(
                 "/sources/fakesrc/pause",
-                headers={"Authorization": f"Bearer {valid_token}"},
+                headers={"Authorization": f"Bearer {user_token}"},
             )
-            read = await client.get("/sources")
-        return no_auth, with_auth, read
+            as_admin = await client.post(
+                "/sources/fakesrc/pause",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            read_no_auth = await client.get("/sources")
+            read_user = await client.get(
+                "/sources", headers={"Authorization": f"Bearer {user_token}"}
+            )
+        return no_auth, as_user, as_admin, read_no_auth, read_user
 
     try:
-        no_auth, with_auth, read = _run(scenario())
+        no_auth, as_user, as_admin, read_no_auth, read_user = _run(scenario())
     finally:
         api_deps._db = original
         _run(db.close())
 
     assert no_auth.status_code == 401
-    assert with_auth.status_code == 404  # auth passed; source row absent
-    assert read.status_code == 200
+    assert as_user.status_code == 403  # authenticated but not an administrator
+    assert as_admin.status_code == 404  # authorized; source row is absent
+    assert read_no_auth.status_code == 401
+    assert read_user.status_code == 200

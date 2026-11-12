@@ -1,26 +1,33 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
-export function getAuthToken(): string | null {
-  if (typeof window === "undefined") return null
-  try {
-    return localStorage.getItem("auth_token") || localStorage.getItem("access_token") || null
-  } catch {
-    return null
-  }
+function getCookie(name: string): string | null {
+  if (typeof document === "undefined") return null
+  const match = document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(`${name}=`))
+  return match ? decodeURIComponent(match.split("=").slice(1).join("=")) : null
+}
+
+function isUnsafeMethod(method: string): boolean {
+  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())
 }
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && options?.body instanceof FormData
+  const method = options?.method || "GET"
   const headers: Record<string, string> = isFormData ? {} : { "Content-Type": "application/json" }
-  const token = getAuthToken()
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`
+  // Double-submit CSRF protection for cookie-authenticated state changes.
+  if (isUnsafeMethod(method)) {
+    const csrf = getCookie("csrf_token")
+    if (csrf) headers["X-CSRF-Token"] = csrf
   }
   const mergedHeaders = { ...headers, ...(options?.headers as Record<string, string> | undefined) }
   let res: Response
   try {
     res = await fetch(`${API_BASE}${path}`, {
       ...options,
+      method,
+      credentials: "include",
       headers: mergedHeaders,
     })
   } catch (e: any) {
@@ -84,20 +91,30 @@ export const jobsService = {
 
 export const authService = {
   login: async (email: string, password: string) => {
-    const result = await fetchAPI<{ access_token: string; email: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) })
-    if (typeof window !== "undefined") localStorage.setItem("auth_token", result.access_token)
-    return result
+    return fetchAPI<{ access_token: string; email: string; role: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) })
   },
   register: async (email: string, password: string) => {
-    const result = await fetchAPI<{ access_token: string; email: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password }) })
-    if (typeof window !== "undefined") localStorage.setItem("auth_token", result.access_token)
-    return result
+    // Registration is deliberately enumeration-resistant and does not return a
+    // token. Sign in immediately afterwards to establish the session.
+    await fetchAPI<{ detail: string }>("/auth/register", { method: "POST", body: JSON.stringify({ email, password }) })
+    return authService.login(email, password)
   },
-  me: () => fetchAPI<{ email: string; user_id: string }>("/auth/me"),
-  logout: () => {
-    if (typeof window !== "undefined") {
-      localStorage.removeItem("auth_token")
-      localStorage.removeItem("access_token")
+  me: () => fetchAPI<{ email: string; user_id: string; role: string }>("/auth/me"),
+  createTelegramLinkCode: () =>
+    fetchAPI<{ code: string; expires_at: string }>("/auth/telegram/link-code", { method: "POST" }),
+  isAuthenticated: async () => {
+    try {
+      await authService.me()
+      return true
+    } catch {
+      return false
+    }
+  },
+  logout: async () => {
+    try {
+      await fetchAPI<{ detail: string }>("/auth/logout", { method: "POST" })
+    } catch {
+      // The local session is still considered signed out if the API is down.
     }
   },
 }
@@ -113,10 +130,7 @@ export const candidateService = {
   },
   deleteCv: () => fetchAPI<{ message: string }>("/candidate/cv", { method: "DELETE" }),
   downloadCv: async () => {
-    const headers: Record<string, string> = {}
-    const token = getAuthToken()
-    if (token) headers.Authorization = `Bearer ${token}`
-    const res = await fetch(`${API_BASE}/candidate/cv/file`, { headers })
+    const res = await fetch(`${API_BASE}/candidate/cv/file`, { credentials: "include" })
     if (!res.ok) throw new Error(res.status === 404 ? "No CV uploaded" : "Could not download CV")
     return res.blob()
   },

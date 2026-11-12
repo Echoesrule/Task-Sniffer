@@ -1,36 +1,50 @@
-version: "3.8"
-
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-work_bot_hunter}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Deliberately no published port: PostgreSQL is reachable only on the
+    # Compose network. Use `docker compose exec db psql ...` for maintenance.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 5s
       retries: 5
+    security_opt:
+      - no-new-privileges:true
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      - --appendonly
+      - "yes"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redisdata:/data
+    # No published port. Authentication is required even on the internal network.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
+    security_opt:
+      - no-new-privileges:true
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     command: /bin/sh -c "alembic upgrade head && uvicorn backend.api.app:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
@@ -40,20 +54,35 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      CV_STORAGE_PATH: /data/cvs
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_ADMIN_CHAT_IDS: ${TELEGRAM_ADMIN_CHAT_IDS:-}
+      GREENHOUSE_ENABLED: ${GREENHOUSE_ENABLED:-false}
+      GREENHOUSE_BOARD_TOKENS: ${GREENHOUSE_BOARD_TOKENS:-}
+      ASHBY_ENABLED: ${ASHBY_ENABLED:-false}
+      ASHBY_BOARD_NAMES: ${ASHBY_BOARD_NAMES:-}
+      WORKABLE_ACCOUNT_SUBDOMAINS: ${WORKABLE_ACCOUNT_SUBDOMAINS:-}
     volumes:
-      - ./backend:/app/backend
       - cv_data:/data/cvs
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     command: celery -A backend.workers.celery_app worker -l info -c 2
     environment:
       APP_ENV: production
@@ -61,20 +90,28 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      CV_STORAGE_PATH: /data/cvs
+      GREENHOUSE_ENABLED: ${GREENHOUSE_ENABLED:-false}
+      GREENHOUSE_BOARD_TOKENS: ${GREENHOUSE_BOARD_TOKENS:-}
+      ASHBY_ENABLED: ${ASHBY_ENABLED:-false}
+      ASHBY_BOARD_NAMES: ${ASHBY_BOARD_NAMES:-}
+      WORKABLE_ACCOUNT_SUBDOMAINS: ${WORKABLE_ACCOUNT_SUBDOMAINS:-}
     volumes:
-      - ./backend:/app/backend
       - cv_data:/data/cvs
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
 
   beat:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     command: celery -A backend.workers.celery_app beat -l info
     environment:
       APP_ENV: production
@@ -82,15 +119,22 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY in .env}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:?Set DATABASE_URL_SYNC in .env}
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - ./backend:/app/backend
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
+      CV_STORAGE_PATH: /data/cvs
+      GREENHOUSE_ENABLED: ${GREENHOUSE_ENABLED:-false}
+      GREENHOUSE_BOARD_TOKENS: ${GREENHOUSE_BOARD_TOKENS:-}
+      ASHBY_ENABLED: ${ASHBY_ENABLED:-false}
+      ASHBY_BOARD_NAMES: ${ASHBY_BOARD_NAMES:-}
+      WORKABLE_ACCOUNT_SUBDOMAINS: ${WORKABLE_ACCOUNT_SUBDOMAINS:-}
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   pgdata:
+  redisdata:
   cv_data:

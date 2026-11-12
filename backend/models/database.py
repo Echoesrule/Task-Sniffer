@@ -91,19 +91,31 @@ class Source(Base):
 
 
 class User(Base):
-    """Basic auth user."""
+    """Basic auth user.
+
+    ``role`` is the only authorization source of truth. Registration and profile
+    endpoints never accept it; it is changed only by the administrative CLI.
+    ``token_version`` is embedded in issued JWTs and incremented on logout or
+    password change so previously issued tokens can be revoked.
+    """
 
     __tablename__ = "users"
 
     id = Column(String(36), primary_key=True, default=_uuid)
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="user", server_default="user")
+    token_version = Column(Integer, nullable=False, default=0, server_default="0")
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     candidates = relationship("Candidate", back_populates="user", lazy="selectin")
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
     def __repr__(self) -> str:
         return f"<User {self.email}>"
@@ -549,6 +561,30 @@ class TelegramUser(Base):
         return f"<TelegramUser {self.chat_id} ({self.username})>"
 
 
+class TelegramLinkCode(Base):
+    """Short-lived, single-use challenge for linking a web account to Telegram.
+
+    Only a SHA-256 hash of the code is stored. The plaintext code is shown once
+    by the authenticated web UI and is never written to logs or Telegram state.
+    """
+
+    __tablename__ = "telegram_link_codes"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User")
+
+    def __repr__(self) -> str:
+        return f"<TelegramLinkCode user={self.user_id} used={bool(self.used_at)}>"
+
+
 class TelegramAlertDelivery(Base):
     """Durable idempotency record for a Telegram user's job alert."""
 
@@ -641,6 +677,10 @@ class Database:
 #: additive columns for existing tables (idempotent ALTER TABLE on first boot).
 #: Definitions must be legal SQLite ADD COLUMN clauses.
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "users": {
+        "role": "VARCHAR(20) NOT NULL DEFAULT 'user'",
+        "token_version": "INTEGER NOT NULL DEFAULT 0",
+    },
     "sources": {
         "access_method": "VARCHAR(20) DEFAULT 'html'",
         "permission_status": "VARCHAR(20) DEFAULT 'REVIEW'",

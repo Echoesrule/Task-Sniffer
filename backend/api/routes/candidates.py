@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -27,7 +29,33 @@ from backend.security.cv_encryption import (
 router = APIRouter()
 
 MAX_CV_BYTES = 10 * 1024 * 1024
+_CV_CHUNK_BYTES = 64 * 1024
 _ALLOWED_CV_SUFFIXES = {".pdf", ".doc", ".docx"}
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def _validate_cv_signature(content: bytes, suffix: str) -> None:
+    """Validate file magic independently of the client-supplied MIME type."""
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if suffix == ".pdf":
+        if not content.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail="File is not a valid PDF")
+        return
+    if suffix == ".doc":
+        if not content.startswith(_OLE_MAGIC):
+            raise HTTPException(status_code=400, detail="File is not a valid DOC document")
+        return
+    if suffix == ".docx":
+        if not content.startswith(b"PK\x03\x04"):
+            raise HTTPException(status_code=400, detail="File is not a valid DOCX document")
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = set(archive.namelist())
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise HTTPException(status_code=400, detail="File is not a valid DOCX document") from exc
+        if "[Content_Types].xml" not in names or not any(name.startswith("word/") for name in names):
+            raise HTTPException(status_code=400, detail="File is not a valid DOCX document")
 
 
 async def _candidate_for_user(db: AsyncSession, user_id: str) -> Candidate | None:
@@ -138,12 +166,22 @@ async def upload_cv(
             detail=f"Unsupported file type: {file.content_type}. Allowed: PDF, DOC, DOCX",
         )
 
-    content = await file.read()
-    if len(content) > MAX_CV_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"CV exceeds the {MAX_CV_BYTES // (1024 * 1024)} MB limit",
-        )
+    # Bound the read so a malicious or accidental huge upload cannot force the
+    # entire body into memory before the limit is checked.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_CV_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_CV_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"CV exceeds the {MAX_CV_BYTES // (1024 * 1024)} MB limit",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
 
     # Never trust the client filename: strip any path components and derive the
     # stored name from a server-generated UUID so uploads cannot escape the
@@ -155,6 +193,10 @@ async def upload_cv(
             status_code=400,
             detail=f"Unsupported file extension '{suffix or safe_name}'. Allowed: .pdf, .doc, .docx",
         )
+
+    # The extension and the client Content-Type are both attacker-controlled;
+    # the file signature is the authoritative format check.
+    _validate_cv_signature(content, suffix)
 
     settings = get_settings()
     try:

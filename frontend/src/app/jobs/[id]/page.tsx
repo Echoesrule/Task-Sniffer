@@ -112,7 +112,7 @@ export default function JobDetailPage() {
   const trackJob = async () => {
     setTracking(true)
     try {
-      await applicationsService.create({ job_id: job.id, match_score: job.match_score, risk_score: job.risk_score })
+      await applicationsService.create({ job_id: job.id })
       setTracked(true)
       toast("Job added to your applications")
     } catch (e: any) {

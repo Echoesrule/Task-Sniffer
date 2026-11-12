@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 
 import httpx
+import pytest
 from sqlalchemy import func as sa_func, select
 
 from backend.models.database import Candidate, Database, IngestionError, Job, Source
@@ -149,6 +150,11 @@ def test_run_source_persists_jobs_with_url_status(tmp_path):
     _run(db.close())
 
     assert result.listings_seen == 3
+    assert result.parsed_jobs == 3
+    assert result.identified_urls == 3
+    assert result.normalized_jobs == 3
+    assert result.validated_jobs == 3
+    assert result.persistence_attempts == 3
     assert result.new_jobs == 3
     assert result.errors == 0
     assert len(jobs) == 3
@@ -182,6 +188,8 @@ def test_run_source_dedups_and_merges_provenance(tmp_path):
     # re-scrape: everything matches by (source, source_job_id) -> updated
     assert result2.new_jobs == 0
     assert result2.updated_jobs == 3
+    assert result2.validated_jobs == 3
+    assert result2.persistence_attempts == 3
     assert len([r for r in rows]) == 3
     assert src.unique_jobs == 3
 
@@ -236,25 +244,85 @@ def test_run_source_refused_source_does_nothing(tmp_path):
     assert result.error_messages and "permission_status" in result.error_messages[0]
 
 
-def test_run_source_force_bypasses_access_policy(tmp_path):
-    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t5.db'}")
+def test_force_cannot_bypass_access_policy_or_disabled_state():
+    from backend.sources.models import SourceStatus
+
+    registry = SourceRegistry()
+    registry.register(
+        SourceConfig(
+            name="review-source",
+            access_method=AccessMethod.HTML,
+            permission_status=PermissionStatus.REVIEW,
+        )
+    )
+    registry.register(
+        SourceConfig(
+            name="disabled-source",
+            access_method=AccessMethod.HTML,
+            permission_status=PermissionStatus.APPROVED,
+            source_status=SourceStatus.DISABLED,
+        )
+    )
+    engine = IngestionEngine(
+        None,  # blocked sources return before opening a database session
+        registry=registry,
+        adapter_factory=lambda _cfg: pytest.fail("blocked source adapter was constructed"),
+    )
+
+    review = _run(engine.run_source("review-source", force=True))
+    disabled = _run(engine.run_source("disabled-source", force=True))
+
+    assert review.error_messages and "permission_status=REVIEW" in review.error_messages[0]
+    assert disabled.error_messages and "source disabled" in disabled.error_messages[0]
+
+
+def test_paused_source_is_not_ingested_by_scheduler_even_when_forced(tmp_path):
+    """The persisted pause state overrides the in-memory registry and force."""
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'paused.db'}")
     _run(db.init_db())
 
     async def scenario():
         engine = _engine_with(db)
-        blocked = SourceConfig(
-            name="fakesrc",
-            access_method=AccessMethod.HTML,
-            permission_status=PermissionStatus.REVIEW,
-        )
-        engine._registry.register(blocked)
-        result = await engine.run_source("fakesrc", force=True)
-        return result
+        engine._registry.register(_approved("fakesrc"))
+        async with db.async_session_factory() as session:
+            session.add(
+                Source(
+                    name="fakesrc",
+                    url="https://fake.example.com",
+                    source_status="PAUSED",
+                    pause_reason="MANUAL",
+                )
+            )
+            await session.commit()
 
-    result = _run(scenario())
+        paused_result = await engine.run_source("fakesrc", force=True)
+        async with db.async_session_factory() as session:
+            jobs_while_paused = (
+                await session.execute(select(sa_func.count(Job.id)))
+            ).scalar_one()
+            row = (
+                await session.execute(select(Source).where(Source.name == "fakesrc"))
+            ).scalar_one()
+            row.source_status = "ACTIVE"
+            row.pause_reason = None
+            row.retry_at = None
+            await session.commit()
+
+        resumed_result = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            jobs_after_resume = (
+                await session.execute(select(sa_func.count(Job.id)))
+            ).scalar_one()
+        return paused_result, jobs_while_paused, resumed_result, jobs_after_resume
+
+    paused, jobs_while_paused, resumed, jobs_after_resume = _run(scenario())
     _run(db.close())
-    assert result.errors == 0
-    assert result.new_jobs == 3
+
+    assert paused.paused is True
+    assert paused.pause_reason == "MANUAL"
+    assert jobs_while_paused == 0
+    assert resumed.paused is False
+    assert jobs_after_resume > 0
 
 
 def test_run_source_error_isolation(tmp_path):
@@ -289,9 +357,10 @@ def test_run_source_error_isolation(tmp_path):
     _run(db.close())
     assert result.errors == 1
     assert result.new_jobs == 2
+    assert result.persistence_attempts == 3
     assert len(rows) == 2
     assert "persist boom" in errors[0].error_message
-    assert errors[0].stage == "process"
+    assert errors[0].stage == "persist"
 
 
 def test_run_source_reports_unconfigured_source(tmp_path):

@@ -7,7 +7,6 @@ applications happen on the auth-gated erecruitment.kra.go.ke portal, so
 
 from __future__ import annotations
 
-import logging
 import re
 from urllib.parse import urlparse
 
@@ -16,8 +15,6 @@ from backend.sources.models import SourceConfig
 from backend.sources.rate_limit import RateLimiter
 
 from ._common import absolute, clean_text, dedupe_by_url, job_title_from_container
-
-logger = logging.getLogger(__name__)
 
 _DETAIL = re.compile(r"/(career|careers|job|jobs|vacancy|vacancies|position|advert)[^/?#]*/[^/?#]+/?$", re.IGNORECASE)
 
@@ -39,11 +36,7 @@ class KraAdapter(JobSourceAdapter):
     async def _fetch(self, url: str, limiter: RateLimiter | None) -> str:
         if limiter is not None:
             await limiter.wait_slot()
-        try:
-            return await self.fetch(url) or ""
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[kra] careers fetch failed %s: %s", url, exc)
-            return ""
+        return await self.fetch(url) or ""
 
     def _parse_page(self, html: str, base_url: str) -> list[ListingItem]:
         if not html:

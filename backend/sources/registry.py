@@ -9,6 +9,7 @@ DISABLED.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from backend.sources.models import (
@@ -37,6 +38,7 @@ def _audited(
     rate_limit: float = 3.0,
     requires_auth: bool = False,
     schedule_minutes: int = 60,
+    extra_urls: list[str] | None = None,
     notes: str = "",
     active: bool = True,
 ) -> SourceConfig:
@@ -44,6 +46,7 @@ def _audited(
         name=name,
         url=url,
         feed_url=feed_url,
+        extra_urls=extra_urls or [],
         access_method=access_method,
         permission_status=permission,
         robots_status=robots,
@@ -60,6 +63,44 @@ def _audited(
     )
 
 
+_BOARD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def _configured_ids(variable: str, environ: dict[str, str] | None = None) -> list[str]:
+    """Read comma-separated public board/account identifiers, never credentials."""
+    if environ is None:
+        from backend.config import get_settings
+
+        values = str(getattr(get_settings(), variable.lower(), "") or "")
+    else:
+        values = environ.get(variable, "")
+    return list(dict.fromkeys(
+        part for raw in values.split(",")
+        if (part := raw.strip()) and _BOARD_ID.fullmatch(part)
+    ))
+
+
+def _explicitly_enabled(variable: str, environ: dict[str, str] | None = None) -> bool:
+    """Require an explicit deployment opt-in; registration alone does not run a source."""
+    if environ is None:
+        from backend.config import get_settings
+
+        return bool(getattr(get_settings(), variable.lower(), False))
+    value = environ.get(variable, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _board_source_enabled(
+    identifiers_variable: str,
+    enabled_variable: str,
+    environ: dict[str, str] | None = None,
+) -> bool:
+    """A configured ATS source needs both known board IDs and an explicit opt-in."""
+    return bool(_configured_ids(identifiers_variable, environ)) and _explicitly_enabled(
+        enabled_variable, environ
+    )
+
+
 # ---------------------------------------------------------------------------
 # Milestone 1 audit results (see docs/source_audit.md, 2026-08-30)
 # ---------------------------------------------------------------------------
@@ -69,27 +110,31 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
     "fuzu": _audited(
         "fuzu",
         AccessMethod.HTML,
-        PermissionStatus.APPROVED,
+        PermissionStatus.RESTRICTED,
         url="https://www.fuzu.com/kenya/jobs",
-        robots=RobotsStatus.ALLOWED,
+        robots=RobotsStatus.PARTIAL,
+        terms=TermsStatus.PROHIBITS,
         provenance=ProvenanceClass.JOB_BOARD,
         rate_limit=3.0,
         schedule_minutes=45,
-        notes="robots allowed; publishes kenya/sitemap-job-listings.xml.gz",
+        active=False,
+        notes="Current Fuzu terms prohibit automated scraping/extraction. Keep the existing adapter registered but disabled unless Fuzu provides written authorization or an approved feed.",
     ),
     "myjobmag": _audited(
         "myjobmag",
-        AccessMethod.RSS,
-        PermissionStatus.APPROVED,
+        AccessMethod.HTML,
+        PermissionStatus.REVIEW,
         url="https://www.myjobmag.co.ke/jobs",
         robots=RobotsStatus.PARTIAL,
+        terms=TermsStatus.UNCLEAR,
         provenance=ProvenanceClass.JOB_BOARD,
         rate_limit=5.0,
         schedule_minutes=45,
+        active=False,
         notes=(
-            "robots blocks all query-string URLs (/*?), /search/jobs?*, /apply-now/, "
-            "/job-application/. Crawl only /jobs and detail pages /job/<slug>; a "
-            "verified RSS feed URL can be set via feed_url."
+            "Current robots.txt blocks query-string URLs, /apply-now/ and "
+            "/job-application/. Terms do not clearly authorize automated "
+            "extraction; keep disabled pending permission review."
         ),
     ),
     "corporatestaffing": _audited(
@@ -105,12 +150,15 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
     "careerpointkenya": _audited(
         "careerpointkenya",
         AccessMethod.HTML,
-        PermissionStatus.APPROVED,
+        PermissionStatus.REVIEW,
         url="https://www.careerpointkenya.co.ke",
-        robots=RobotsStatus.ALLOWED,
+        robots=RobotsStatus.UNKNOWN,
+        terms=TermsStatus.UNCLEAR,
         provenance=ProvenanceClass.JOB_BOARD,
         rate_limit=5.0,
         schedule_minutes=60,
+        active=False,
+        notes="No adapter is registered and current robots/terms could not be verified; keep disabled pending review.",
     ),
     # --- Official (very high provenance; applying is auth-gated) --------
     "kra": _audited(
@@ -161,23 +209,33 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
         "greenhouse",
         AccessMethod.API,
         PermissionStatus.APPROVED,
-        url="https://boards-api.greenhouse.io",
+        url="https://job-boards.greenhouse.io/",
         country="GLOBAL",
         tier=2,
         rate_limit=1.5,
         schedule_minutes=180,
-        notes="official public boards API",
+        extra_urls=_configured_ids("GREENHOUSE_BOARD_TOKENS"),
+        active=_board_source_enabled("GREENHOUSE_BOARD_TOKENS", "GREENHOUSE_ENABLED"),
+        notes=(
+            "Official public Job Board API. Configure known employer tokens in "
+            "GREENHOUSE_BOARD_TOKENS and explicitly opt in with GREENHOUSE_ENABLED=true."
+        ),
     ),
     "ashby": _audited(
         "ashby",
         AccessMethod.API,
         PermissionStatus.APPROVED,
-        url="https://api.ashbyhq.com",
+        url="https://jobs.ashbyhq.com/",
         country="GLOBAL",
         tier=2,
         rate_limit=1.5,
         schedule_minutes=180,
-        notes="official public posting API",
+        extra_urls=_configured_ids("ASHBY_BOARD_NAMES"),
+        active=_board_source_enabled("ASHBY_BOARD_NAMES", "ASHBY_ENABLED"),
+        notes=(
+            "Official public posting API. Configure known employer board names in "
+            "ASHBY_BOARD_NAMES and explicitly opt in with ASHBY_ENABLED=true."
+        ),
     ),
     # --- REVIEW (do not enable until re-audited) -------------------------
     "brightermonday": _audited(
@@ -185,14 +243,92 @@ SOURCE_REGISTRY: dict[str, SourceConfig] = {
         AccessMethod.HTML,
         PermissionStatus.REVIEW,
         url="https://www.brightermonday.co.ke",
-        robots=RobotsStatus.UNKNOWN,
+        robots=RobotsStatus.PARTIAL,
         terms=TermsStatus.UNCLEAR,
         rate_limit=5.0,
         active=False,
 notes=(
-            "no public API; robots/terms at .co.ke unverified; "
-            "legacy adapter points at stale .com domain. Keep off until re-audited."
+            "Current robots.txt disallows /job/ detail pages and allows sitemap "
+            "discovery; no permitted detail flow or terms approval established. "
+            "Legacy scraper targets stale .com domain. Keep disabled pending review."
         ),
+    ),
+    "jobwebkenya": _audited(
+        "jobwebkenya",
+        AccessMethod.HTML,
+        PermissionStatus.REVIEW,
+        url="https://jobwebkenya.com/",
+        robots=RobotsStatus.UNKNOWN,
+        terms=TermsStatus.UNCLEAR,
+        provenance=ProvenanceClass.JOB_BOARD,
+        rate_limit=5.0,
+        active=False,
+        notes="Candidate source registered only; current robots/terms and permitted discovery method have not been verified, and no adapter is enabled.",
+    ),
+    "workable": _audited(
+        "workable",
+        AccessMethod.API,
+        PermissionStatus.REVIEW,
+        url="https://apply.workable.com/",
+        country="GLOBAL",
+        tier=2,
+        rate_limit=2.0,
+        schedule_minutes=180,
+        extra_urls=_configured_ids("WORKABLE_ACCOUNT_SUBDOMAINS"),
+        active=False,
+        notes=(
+            "Adapter uses Workable's documented unauthenticated published-jobs "
+            "account endpoint. Configure explicitly selected employer subdomains "
+            "with WORKABLE_ACCOUNT_SUBDOMAINS. Aggregator redistribution terms are unverified; "
+            "permission remains REVIEW. SPI jobs API requires employer-issued "
+            "r_jobs access and is not used."
+        ),
+    ),
+    "remotive": _audited(
+        "remotive",
+        AccessMethod.API,
+        PermissionStatus.RESTRICTED,
+        url="https://remotive.com/",
+        feed_url="https://remotive.com/remote-jobs/api",
+        extra_urls=["https://remotive.com/remote-jobs/feed"],
+        robots=RobotsStatus.UNKNOWN,
+        terms=TermsStatus.PROHIBITS,
+        provenance=ProvenanceClass.AGGREGATOR,
+        country="GLOBAL",
+        tier=2,
+        active=False,
+        notes=(
+            "Not enabled: current Terms of Use prohibit automated extraction and "
+            "redistribution without written permission. Public API requires source "
+            "attribution/backlinks and forbids some third-party/job-board uses; "
+            "Task Sniffer signup/display terms need written clearance."
+        ),
+    ),
+    "linkedin": _audited(
+        "linkedin",
+        AccessMethod.MANUAL,
+        PermissionStatus.RESTRICTED,
+        url="https://www.linkedin.com/jobs/",
+        robots=RobotsStatus.UNKNOWN,
+        terms=TermsStatus.PROHIBITS,
+        provenance=ProvenanceClass.JOB_BOARD,
+        country="GLOBAL",
+        tier=2,
+        active=False,
+        notes="Do not scrape. LinkedIn User Agreement prohibits scraping/copying services; developer/API access is not blanket permission for job retrieval. Requires a written approved product scope or partner feed.",
+    ),
+    "fiverr": _audited(
+        "fiverr",
+        AccessMethod.MANUAL,
+        PermissionStatus.RESTRICTED,
+        url="https://www.fiverr.com/",
+        robots=RobotsStatus.UNKNOWN,
+        terms=TermsStatus.PROHIBITS,
+        provenance=ProvenanceClass.AGGREGATOR,
+        country="GLOBAL",
+        tier=3,
+        active=False,
+        notes="Freelance-gig marketplace, not a conventional job board. Terms prohibit unauthorized automation/scraping; no general public gig API identified. Requires an authorized access method and separate product treatment.",
     ),
     # --- RESTRICTED (never scrape) --------------------------------------
     "wellfound": _audited(
@@ -246,6 +382,8 @@ class SourceRegistry:
                 f"permission_status={cfg.permission_status.value} - "
                 "automated collection refused"
             )
+        if cfg.source_status.value == "DISABLED":
+            return f"source disabled: {cfg.pause_reason or 'not explicitly enabled'}"
         if cfg.paused:
             return f"source paused: {cfg.pause_reason}"
         return None

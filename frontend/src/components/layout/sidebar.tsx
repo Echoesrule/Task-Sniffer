@@ -11,7 +11,7 @@ import {
 import { useState } from "react"
 import { useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { authService, getAuthToken } from "@/services/api"
+import { authService } from "@/services/api"
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -27,7 +27,7 @@ export function Sidebar() {
   const router = useRouter()
   const [collapsed, setCollapsed] = useState(false)
   const [signedIn, setSignedIn] = useState(false)
-  useEffect(() => { setSignedIn(Boolean(getAuthToken())) }, [])
+  useEffect(() => { authService.isAuthenticated().then(setSignedIn) }, [])
 
   return (
     <aside className={cn(
@@ -66,8 +66,8 @@ export function Sidebar() {
 
       <div className="border-t border-border p-3">
         <HunterStatus collapsed={collapsed} />
-        {!collapsed && <button onClick={() => {
-          if (signedIn) { authService.logout(); setSignedIn(false); router.push("/login") }
+        {!collapsed && <button onClick={async () => {
+          if (signedIn) { await authService.logout(); setSignedIn(false); router.push("/login") }
           else router.push("/login")
         }} className="mt-3 w-full text-left text-xs text-text-secondary hover:text-text-primary px-2">
           {signedIn ? "Sign out" : "Sign in"}

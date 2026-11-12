@@ -18,7 +18,9 @@ to ``ingestion_errors``. On sustained rate-limiting the source is paused.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -52,6 +54,35 @@ from backend.sources.urls import (
 
 logger = logging.getLogger(__name__)
 
+# Per-process, per-event-loop source locks shared by every engine instance.
+# The API constructs a fresh engine per request, so an instance-level lock would
+# not prevent two concurrent HTTP runs of the same source from overlapping.
+_RUN_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _run_lock(name: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (id(loop), name)
+    lock = _RUN_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RUN_LOCKS[key] = lock
+    return lock
+
+
+def _safe_error_message(exc: Exception) -> str:
+    """Keep diagnostic context while removing URL query/userinfo material."""
+    message = str(exc)
+    message = re.sub(r"https?://[^\s'\"]+", "<url>", message, flags=re.IGNORECASE)
+    return f"{type(exc).__name__}: {message}"[:1000]
+
+
+class _PersistenceFailure(Exception):
+    def __init__(self, original: Exception, outcome: "_ListingOutcome") -> None:
+        self.original = original
+        self.outcome = outcome
+        super().__init__(str(original))
+
 
 @dataclass
 class SourceRunResult:
@@ -61,6 +92,12 @@ class SourceRunResult:
     started_at: str = ""
     finished_at: str = ""
     listings_seen: int = 0
+    parsed_jobs: int = 0
+    identified_urls: int = 0
+    normalized_jobs: int = 0
+    validated_jobs: int = 0
+    rejected_urls: int = 0
+    persistence_attempts: int = 0
     new_jobs: int = 0
     updated_jobs: int = 0
     duplicates: int = 0
@@ -77,6 +114,12 @@ class SourceRunResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "listings_seen": self.listings_seen,
+            "parsed_jobs": self.parsed_jobs,
+            "identified_urls": self.identified_urls,
+            "normalized_jobs": self.normalized_jobs,
+            "validated_jobs": self.validated_jobs,
+            "rejected_urls": self.rejected_urls,
+            "persistence_attempts": self.persistence_attempts,
             "new_jobs": self.new_jobs,
             "updated_jobs": self.updated_jobs,
             "duplicates": self.duplicates,
@@ -124,6 +167,20 @@ class IngestionEngine:
         limit: int | None = None,
         on_job: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> SourceRunResult:
+        lock = _run_lock(name)
+        async with lock:
+            return await self._run_source_unlocked(
+                name, force=force, limit=limit, on_job=on_job
+            )
+
+    async def _run_source_unlocked(
+        self,
+        name: str,
+        *,
+        force: bool = False,
+        limit: int | None = None,
+        on_job: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
+    ) -> SourceRunResult:
         self._candidates = None
         started = utcnow()
         limit = limit or self.max_jobs_per_source
@@ -136,8 +193,42 @@ class IngestionEngine:
             result.finished_at = utcnow().isoformat()
             return result
 
+        # The database row is authoritative for operator pause state. The
+        # in-memory registry cannot observe API pause/resume calls.
+        persisted = None
+        if self._sf is not None:
+            async with self._sf() as session:
+                persisted = (
+                    await session.execute(select(Source).where(Source.name == name))
+                ).scalar_one_or_none()
+        if persisted is not None:
+            pause_reason = (persisted.pause_reason or "").upper()
+            retry_at = persisted.retry_at
+            if retry_at is not None and retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            retry_due = retry_at is not None and retry_at <= datetime.now(timezone.utc)
+            manual_pause = persisted.source_status == "PAUSED" and pause_reason not in {
+                "RATE_LIMITED",
+                "SOURCE_FAILED",
+            }
+            if persisted.source_status == "DISABLED":
+                result.paused = True
+                result.pause_reason = persisted.pause_reason or "DISABLED"
+                result.error_messages.append("source disabled")
+                result.finished_at = utcnow().isoformat()
+                return result
+            if persisted.source_status == "PAUSED" and not retry_due:
+                # Manual pauses are never bypassed, including by force.
+                if manual_pause or not force:
+                    result.paused = True
+                    result.pause_reason = persisted.pause_reason or "PAUSED"
+                    result.error_messages.append("source paused")
+                    result.finished_at = utcnow().isoformat()
+                    return result
+
         refuse = self._registry.refuse_reason(name)
-        if refuse and not force:
+        policy_blocked = config.permission_blocked or config.source_status.value == "DISABLED"
+        if refuse and (not force or policy_blocked):
             logger.info("[%s] refused: %s", name, refuse)
             result.error_messages.append(refuse)
             result.finished_at = utcnow().isoformat()
@@ -156,13 +247,13 @@ class IngestionEngine:
             # a transient fetch failure. Report it clearly and leave the source
             # unpaused so it resumes once configuration is fixed.
             result.errors += 1
-            result.error_messages.append(str(exc))
-            logger.error("[%s] adapter unavailable: %s", name, exc)
+            result.error_messages.append(_safe_error_message(exc))
+            logger.error("[%s] adapter unavailable: %s", name, _safe_error_message(exc))
             if not self.dry_run:
                 async with self._sf() as session:
                     source_row = await self._get_or_create_source(session, config)
                     await self._record_error(session, source_row, stage="adapter", exc=exc)
-                    self._mark_source_error(session, source_row, str(exc))
+                    self._mark_source_error(session, source_row, _safe_error_message(exc))
                     await session.commit()
             result.finished_at = utcnow().isoformat()
             return result
@@ -175,11 +266,13 @@ class IngestionEngine:
                 listing_items = await adapter.fetch_listings(limit=limit, limiter=limiter)
             except Exception as exc:  # noqa: BLE001 - isolate source failure
                 result.errors += 1
-                result.error_messages.append(str(exc))
+                result.error_messages.append(_safe_error_message(exc))
+                logger.warning("[%s] listing fetch failed: %s", name, _safe_error_message(exc))
                 await self._record_error(session, source_row, stage="listing", exc=exc)
                 if self.dry_run is False:
-                    self._mark_source_error(session, source_row, str(exc))
+                    self._mark_source_error(session, source_row, _safe_error_message(exc))
                 await session.commit()
+                result.finished_at = utcnow().isoformat()
                 return result
 
             if not listing_items:
@@ -189,6 +282,7 @@ class IngestionEngine:
                 return result
 
             result.listings_seen = len(listing_items)
+            result.parsed_jobs = len(listing_items)
 
             # --- per-listing URL pipeline + persist ----------------------
             jobs_seen: int = 0
@@ -214,13 +308,32 @@ class IngestionEngine:
                     result.invalid_urls += outcome.invalid
                     result.review_urls += outcome.review
                     result.errors += outcome.errors
+                    result.identified_urls += outcome.identified
+                    result.normalized_jobs += outcome.normalized
+                    result.validated_jobs += outcome.validated
+                    result.rejected_urls += outcome.invalid + outcome.review
+                    result.persistence_attempts += outcome.persist_attempts
                     result.error_messages.extend(outcome.errors_details)
                     if on_job is not None:
                         await on_job(name, outcome.job)
                 except Exception as exc:  # noqa: BLE001 - per-job isolation
+                    stage_outcome = exc.outcome if isinstance(exc, _PersistenceFailure) else None
+                    if stage_outcome is not None:
+                        result.identified_urls += stage_outcome.identified
+                        result.normalized_jobs += stage_outcome.normalized
+                        result.validated_jobs += stage_outcome.validated
+                        result.rejected_urls += stage_outcome.invalid + stage_outcome.review
+                        result.persistence_attempts += stage_outcome.persist_attempts
+                        exc = exc.original
                     result.errors += 1
-                    result.error_messages.append(f"{item.title}: {exc}")
-                    await self._record_error(session, source_row, stage="process", exc=exc, job_url=item.raw_url or item.source_url)
+                    result.error_messages.append(f"{item.title}: {_safe_error_message(exc)}")
+                    await self._record_error(
+                        session,
+                        source_row,
+                        stage="persist" if stage_outcome is not None else "process",
+                        exc=exc,
+                        job_url=item.raw_url or item.source_url,
+                    )
 
                 if self.dry_run:
                     await session.rollback()
@@ -245,9 +358,11 @@ class IngestionEngine:
             result.finished_at = utcnow().isoformat()
             await session.commit()
             logger.info(
-                "[%s] run done seen=%d new=%d updated=%d dup=%d invalid=%d review=%d errors=%d",
-                name, result.listings_seen, result.new_jobs, result.updated_jobs,
-                result.duplicates, result.invalid_urls, result.review_urls, result.errors,
+                "[%s] run done fetched=%d parsed=%d identified=%d normalized=%d validated=%d rejected=%d persist_attempts=%d new=%d updated=%d dup=%d errors=%d",
+                name, result.listings_seen, result.parsed_jobs, result.identified_urls,
+                result.normalized_jobs, result.validated_jobs, result.rejected_urls,
+                result.persistence_attempts, result.new_jobs, result.updated_jobs,
+                result.duplicates, result.errors,
             )
             return result
 
@@ -273,6 +388,7 @@ class IngestionEngine:
             outcome.errors += 1
             outcome.errors_details.append(f"{item.title}: no job-detail URL identified")
             return outcome
+        outcome.identified += 1
 
         detail, validation = await self._fetch_and_validate(
             adapter, item, candidate["url"], limiter
@@ -287,6 +403,7 @@ class IngestionEngine:
             raw["url_status"] = validation.status.value
 
         normalized = self._normalizer.normalize(raw, config.name)
+        outcome.normalized += 1
         # carry URL-pipeline provenance through the normalizer's fixed schema
         normalized["url_status"] = raw.get("url_status") or UrlStatus.VALID.value
         normalized["source_url"] = candidate["url"]
@@ -308,17 +425,25 @@ class IngestionEngine:
             else:
                 outcome.review += 1
             logger.info(
-                "[%s] withheld %s (%s): %s",
-                config.name, candidate["url"], status.value, reason,
+                "[%s] withheld listing (%s): %s",
+                config.name, status.value, reason,
+            )
+            outcome.errors_details.append(
+                f"{item.title}: withheld ({status.value}): {reason}"
             )
             return outcome
+        outcome.validated += 1
 
         # --- persist / dedup ---------------------------------------------
         if self.dry_run:
             outcome.new += 1
             return outcome
 
-        persisted = await self._persist_job(session, source_row, normalized, candidate, item)
+        outcome.persist_attempts += 1
+        try:
+            persisted = await self._persist_job(session, source_row, normalized, candidate, item)
+        except Exception as exc:  # noqa: BLE001 - the caller rolls back this listing savepoint
+            raise _PersistenceFailure(exc, outcome) from exc
         outcome.new += persisted.new
         outcome.updated += persisted.updated
         outcome.duplicates += persisted.dup
@@ -720,7 +845,7 @@ class IngestionEngine:
                 job_url=job_url or None,
                 stage=stage,
                 error_class=exc.__class__.__name__,
-                error_message=str(exc)[:4000],
+                error_message=_safe_error_message(exc),
             )
         )
 
@@ -738,6 +863,10 @@ class _ListingOutcome:
     invalid: int = 0
     review: int = 0
     errors: int = 0
+    identified: int = 0
+    normalized: int = 0
+    validated: int = 0
+    persist_attempts: int = 0
     errors_details: list[str] = field(default_factory=list)
     job: dict[str, Any] | None = None
 

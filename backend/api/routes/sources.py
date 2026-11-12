@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -16,7 +17,7 @@ from sqlalchemy import func as sa_func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from backend.api.deps import get_current_user, get_db
+from backend.api.deps import get_current_user, get_db, require_admin
 from backend.models.database import IngestionError, Job, Source
 from backend.sources.registry import default_registry
 
@@ -86,8 +87,42 @@ def _iso(dt) -> str | None:
     return dt.isoformat() if dt else None
 
 
+def _safe_url(value: str | None) -> str | None:
+    """Strip credentials, query strings, and fragments from operational URLs."""
+    if not value:
+        return value
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except ValueError:
+        return "<invalid-url>"
+
+
+def _redact_error(value: str | None) -> str | None:
+    """Strip URLs, filesystem paths, and credential-looking values from errors."""
+    if not value:
+        return value
+    import re
+
+    cleaned = re.sub(r"https?://[^\s'\"]+", "<url>", value)
+    cleaned = re.sub(r"(?:/[\w.\-]+){2,}", "<path>", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[=:]\s*[^\s,;]+",
+        r"\1=<redacted>",
+        cleaned,
+    )
+    return cleaned[:500]
+
+
 @router.get("", response_model=SourceListResponse)
-async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse:
+async def list_sources(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> SourceListResponse:
+    is_admin = current_user.get("role") == "admin"
     rows = (await db.execute(select(Source))).scalars().all()
     out: list[SourceInfo] = []
     registered = {s.name for s in default_registry.all()}
@@ -100,20 +135,24 @@ async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse
                 url=row.url or "",
                 tier=row.tier or 3,
                 country_focus=row.country_focus or "GLOBAL",
-                enabled=bool(row.enabled),
+                # Registry policy is authoritative; DB enabled may be stale.
+                enabled=cfg.crawlable if cfg else False,
                 access_method=(row.access_method or "html"),
                 permission_status=(row.permission_status or "REVIEW"),
                 robots_status=(row.robots_status or "UNKNOWN"),
                 provenance=(row.provenance or "unknown"),
                 requires_auth=bool(row.requires_auth),
                 rate_limit=row.rate_limit or 2.0,
-                crawlable=cfg.crawlable if cfg else bool(row.enabled),
+                crawlable=cfg.crawlable if cfg else False,
                 blocked_reason=default_registry.refuse_reason(row.name) if cfg else None,
-                source_status=row.source_status or "ACTIVE",
-                pause_reason=row.pause_reason,
+                source_status=(
+                    "DISABLED" if cfg and not cfg.crawlable
+                    else row.source_status or "ACTIVE"
+                ),
+                pause_reason=row.pause_reason if is_admin else None,
                 last_audited=_iso(row.last_audited),
                 last_scraped_at=_iso(row.last_scraped_at),
-                last_error=row.last_error,
+                last_error=_redact_error(row.last_error) if is_admin else None,
                 jobs_found=row.jobs_found or 0,
                 unique_jobs=row.unique_jobs or 0,
                 duplicate_rate=row.duplicate_rate or 0.0,
@@ -138,7 +177,7 @@ async def list_sources(db: AsyncSession = Depends(get_db)) -> SourceListResponse
                 url=cfg.url if cfg else "",
                 tier=cfg.tier if cfg else 3,
                 country_focus=cfg.country_focus if cfg else "GLOBAL",
-                enabled=cfg.source_status.value != "DISABLED" if cfg else False,
+                enabled=cfg.crawlable if cfg else False,
                 access_method=cfg.access_method.value if cfg else "html",
                 permission_status=cfg.permission_status.value if cfg else "REVIEW",
                 robots_status=cfg.robots_status.value if cfg else "UNKNOWN",
@@ -160,7 +199,7 @@ async def ingest_source(
     name: str,
     request: SourceRunRequest,
     db: AsyncSession = Depends(get_db),
-    _user: dict[str, Any] = Depends(get_current_user),
+    _user: dict[str, Any] = Depends(require_admin),
 ) -> dict[str, Any]:
     """Trigger a single-source run against the ingestion engine (spec §6)."""
     from backend.services.ingestion import IngestionEngine
@@ -181,7 +220,7 @@ async def pause_source(
     name: str,
     db: AsyncSession = Depends(get_db),
     reason: str = Query("MANUAL", description="Reason for pausing"),
-    _user: dict[str, Any] = Depends(get_current_user),
+    _user: dict[str, Any] = Depends(require_admin),
 ) -> PauseResponse:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:
@@ -197,7 +236,7 @@ async def pause_source(
 async def resume_source(
     name: str,
     db: AsyncSession = Depends(get_db),
-    _user: dict[str, Any] = Depends(get_current_user),
+    _user: dict[str, Any] = Depends(require_admin),
 ) -> PauseResponse:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:
@@ -223,6 +262,7 @@ async def resume_source(
 async def source_url_stats(
     name: str,
     db: AsyncSession = Depends(get_db),
+    _user: dict[str, Any] = Depends(get_current_user),
 ) -> JobUrlStats:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:
@@ -249,6 +289,7 @@ async def source_errors(
     name: str,
     db: AsyncSession = Depends(get_db),
     limit: int = Query(50, ge=1, le=500),
+    _user: dict[str, Any] = Depends(require_admin),
 ) -> list[dict[str, Any]]:
     row = (await db.execute(select(Source).where(Source.name == name))).scalar_one_or_none()
     if row is None:
@@ -264,9 +305,9 @@ async def source_errors(
     return [
         {
             "stage": e.stage,
-            "job_url": e.job_url,
+            "job_url": _safe_url(e.job_url),
             "error_class": e.error_class,
-            "error_message": e.error_message,
+            "error_message": _redact_error(e.error_message),
             "attempt": e.attempt,
             "created_at": _iso(e.created_at),
         }

@@ -1,0 +1,34 @@
+{
+  "name": "Acme",
+  "jobs": [
+    {
+      "title": "Senior Software Engineer",
+      "code": "ENG-42",
+      "shortcode": "ENG-42",
+      "location": {"city": "Nairobi", "country": "Kenya"},
+      "telecommuting": false,
+      "published_on": "2026-10-20",
+      "description": "<p>Build reliable services.</p>",
+      "url": "https://acme.workable.com/jobs/ENG-42",
+      "application_url": "https://acme.workable.com/jobs/ENG-42/candidates/new"
+    },
+    {
+      "title": "Remote Analyst",
+      "shortcode": "AN-7",
+      "workplace_type": "remote",
+      "description": "Analyze data.",
+      "url": "https://apply.workable.com/acme/j/AN-7/"
+    },
+    {
+      "title": "No detail URL",
+      "shortcode": "BAD-1",
+      "application_url": "https://apply.workable.com/acme/j/BAD-1/apply/"
+    },
+    {
+      "title": "Bad external detail",
+      "shortcode": "BAD-2",
+      "url": "https://example.invalid/acme/j/BAD-2/"
+    },
+    null
+  ]
+}

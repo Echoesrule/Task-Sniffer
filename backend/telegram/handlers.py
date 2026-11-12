@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import func as sa_func, select, update as sa_update
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
@@ -18,10 +18,12 @@ from backend.models.database import (
     ApplicationStatusChange,
     Candidate,
     CandidateJobScore,
+    TelegramLinkCode,
     TelegramUser,
     User,
 )
-from backend.security import verify_password
+from backend.security import hash_telegram_link_code
+from backend.security.rate_limit import RateLimitBackendError, limiter
 from backend.matching.scoring import rescore_candidate
 from backend.sources.urls import is_safe_fetch_url
 
@@ -50,6 +52,11 @@ async def _get_user(chat_id: str) -> TelegramUser | None:
             select(TelegramUser).where(TelegramUser.chat_id == chat_id)
         )
         return result.scalars().first()
+
+
+def _is_telegram_admin(update: Update) -> bool:
+    chat_id = str(update.effective_chat.id)
+    return chat_id in get_settings().telegram_admin_chat_id_set
 
 
 async def _ensure_user(update: Update) -> TelegramUser | None:
@@ -165,13 +172,32 @@ async def link_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /link <email> <password>")
+    settings = get_settings()
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /link <code>\n\n"
+            "Generate a one-time code in the web app (Settings → Telegram) and "
+            "enter it here. Passwords are never accepted through Telegram."
+        )
         return
 
-    email = context.args[0].strip().lower()
-    password = " ".join(context.args[1:])
+    chat_id = str(update.effective_chat.id)
+    try:
+        allowed, retry_after = await limiter.hit(
+            f"telegram-link:{chat_id}",
+            limit=settings.telegram_link_attempts,
+            window_seconds=settings.telegram_link_window_seconds,
+        )
+    except RateLimitBackendError:
+        await update.message.reply_text("Account linking is temporarily unavailable. Try again later.")
+        return
+    if not allowed:
+        await update.message.reply_text(
+            f"Too many linking attempts. Try again in {retry_after} seconds."
+        )
+        return
 
+    code = context.args[0].strip().upper()
     db = get_db()
     async with db.async_session_factory() as session:
         result = await session.execute(select(TelegramUser).where(TelegramUser.id == user.id))
@@ -189,17 +215,41 @@ async def link_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text(f"This account is already linked to {label}. Use /unlink first.")
             return
 
-        user_res = await session.execute(select(User).where(User.email == email))
-        web_user = user_res.scalars().first()
-        if not web_user or not verify_password(password, web_user.hashed_password):
-            await update.message.reply_text("Invalid email or password. Account not linked.")
+        now = datetime.now(timezone.utc)
+        code_hash = hash_telegram_link_code(code)
+        # Atomically consume the challenge so two concurrent chats cannot both
+        # redeem the same code. Only one UPDATE can match used_at IS NULL.
+        claim = await session.execute(
+            sa_update(TelegramLinkCode)
+            .where(
+                TelegramLinkCode.code_hash == code_hash,
+                TelegramLinkCode.used_at.is_(None),
+                TelegramLinkCode.expires_at > now,
+            )
+            .values(used_at=now)
+        )
+        if claim.rowcount != 1:
+            await update.message.reply_text("Invalid or expired linking code.")
             return
-        if not web_user.is_active:
+        link_code = (
+            await session.execute(
+                select(TelegramLinkCode).where(TelegramLinkCode.code_hash == code_hash)
+            )
+        ).scalars().first()
+        if not link_code:
+            await update.message.reply_text("Invalid or expired linking code.")
+            return
+
+        web_user = (
+            await session.execute(select(User).where(User.id == link_code.user_id))
+        ).scalars().first()
+        if not web_user or not web_user.is_active:
             await update.message.reply_text("That web account is inactive. Account not linked.")
             return
 
-        cand_res = await session.execute(select(Candidate).where(Candidate.user_id == web_user.id))
-        candidate = cand_res.scalars().first()
+        candidate = (
+            await session.execute(select(Candidate).where(Candidate.user_id == web_user.id))
+        ).scalars().first()
         if not candidate:
             candidate = Candidate(
                 user_id=web_user.id,
@@ -209,9 +259,13 @@ async def link_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             session.add(candidate)
             await session.flush()
 
+        # The challenge was consumed atomically above; now bind the Telegram
+        # identity to the web account's candidate.
         tg_user.candidate_id = candidate.id
         await session.commit()
-        await update.message.reply_text(f"Linked to {web_user.email}. You can now use /apply and /my_applications.")
+        await update.message.reply_text(
+            f"Linked to {web_user.email}. You can now use /apply and /my_applications."
+        )
 
 
 async def unlink_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -429,6 +483,9 @@ async def top_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_telegram_admin(update):
+        await update.message.reply_text("Administrator access required.")
+        return
     db = get_db()
 
     async with db.async_session_factory() as session:
@@ -465,6 +522,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_telegram_admin(update):
+        await update.message.reply_text("Administrator access required.")
+        return
     db = get_db()
 
     async with db.async_session_factory() as session:
@@ -495,7 +555,7 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "Usage: /apply <job_id>\n"
             "Use /top or /search to find job IDs.\n"
-            "You must be linked with /link <email> <password> first."
+            "You must be linked with /link <code> first."
         )
         return
 
@@ -510,7 +570,7 @@ async def apply_job(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         candidate = await _get_linked_candidate(tg_user, session)
         if not candidate:
-            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            await update.message.reply_text("No linked web account. Generate a one-time code in the web app and use /link <code> to link your profile.")
             return
 
         result = await session.execute(
@@ -571,7 +631,7 @@ async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         candidate = await _get_linked_candidate(tg_user, session)
         if not candidate:
-            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            await update.message.reply_text("No linked web account. Generate a one-time code in the web app and use /link <code> to link your profile.")
             return
 
         result = await session.execute(
@@ -642,7 +702,7 @@ async def update_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         candidate = await _get_linked_candidate(tg_user, session)
         if not candidate:
-            await update.message.reply_text("No linked web account. Use /link <email> <password> to link your profile.")
+            await update.message.reply_text("No linked web account. Generate a one-time code in the web app and use /link <code> to link your profile.")
             return
 
         result = await session.execute(
@@ -994,7 +1054,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if data == "menu:link":
         await query.edit_message_text(
-            "Link Account\n\nUse /link <email> <password> to link your web account.\nUse /unlink to unlink.",
+            "Link Account\n\nGenerate a one-time code in the web app (Settings → Telegram) and use /link <code>.\nUse /unlink to unlink.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:profile")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
         )
         return
@@ -1019,7 +1079,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             candidate = await _get_linked_candidate(tg_user, session) if tg_user else None
             if not candidate:
                 await query.edit_message_text(
-                    "My Applications\n\nLink your account to track applications scoped to your profile.\nUse /link <email> <password>.",
+                    "My Applications\n\nLink your account to track applications scoped to your profile.\nUse /link <code> with a one-time code from the web app.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Link Account", callback_data="menu:link")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
                 )
                 return
@@ -1108,7 +1168,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if data == "menu:help":
         await query.edit_message_text(
-            "Task Sniffer Help\n\nCommands:\n/start - Main menu\n/top - Top jobs\n/search <q> - Search\n/link <email> <pass> - Link\n/apply <job_id> - Track\n/my_applications - View apps\n/settings - Preferences\n\nButtons are easier - use the menu!",
+            "Task Sniffer Help\n\nCommands:\n/start - Main menu\n/top - Top jobs\n/search <q> - Search\n/link <code> - Link with a one-time code\n/apply <job_id> - Track\n/my_applications - View apps\n/settings - Preferences\n\nButtons are easier - use the menu!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],[InlineKeyboardButton("🏠 Main Menu", callback_data="menu:main")]]),
         )
         return

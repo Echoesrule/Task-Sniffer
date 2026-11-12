@@ -13,11 +13,41 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func as sa_func
 
 from backend.api.deps import set_db
+from backend.api.middleware import CSRFMiddleware
 from backend.api.routes import applications, analytics, auth, candidates, jobs, sources
 from backend.config import get_settings
 from backend.models.database import Database, Source
 
 logger = logging.getLogger(__name__)
+
+
+async def sync_registry_sources(session, registry=None) -> None:
+    """Materialize current registry policy while preserving runtime history."""
+    from backend.sources.registry import default_registry
+
+    registry = registry or default_registry
+    existing = {s.name: s for s in (await session.execute(select(Source))).scalars().all()}
+    for config in registry.all():
+        row = existing.get(config.name)
+        if row is None:
+            row = Source(
+                name=config.name,
+                url=config.url or f"https://{config.name}",
+                tier=config.tier,
+                country_focus=config.country_focus,
+            )
+            session.add(row)
+        # This is a policy-derived reporting field, never a manual override.
+        row.enabled = config.crawlable
+        row.access_method = config.access_method.value
+        row.permission_status = config.permission_status.value
+        row.robots_status = config.robots_status.value
+        row.terms_status = config.terms_status.value
+        row.provenance = config.provenance.value
+        row.rate_limit = config.rate_limit
+        row.requires_auth = config.requires_auth
+        row.last_audited = config.last_audited
+    await session.commit()
 
 
 @asynccontextmanager
@@ -28,39 +58,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     set_db(db)
 
     async with db.async_session_factory() as session:
-        # Sync audited registry -> DB rows (upsert, preserving any manual state)
-        from backend.sources.registry import default_registry
-
-        existing = {s.name: s for s in (await session.execute(select(Source))).scalars().all()}
-        for config in default_registry.all():
-            row = existing.get(config.name)
-            if row is None:
-                row = Source(
-                    name=config.name,
-                    url=config.url or f"https://{config.name}",
-                    tier=config.tier,
-                    enabled=config.source_status.value != "DISABLED",
-                    country_focus=config.country_focus,
-                    access_method=config.access_method.value,
-                    permission_status=config.permission_status.value,
-                    robots_status=config.robots_status.value,
-                    terms_status=config.terms_status.value,
-                    provenance=config.provenance.value,
-                    rate_limit=config.rate_limit,
-                    requires_auth=config.requires_auth,
-                    last_audited=config.last_audited,
-                )
-                session.add(row)
-            else:
-                row.access_method = config.access_method.value
-                row.permission_status = config.permission_status.value
-                row.robots_status = config.robots_status.value
-                row.terms_status = config.terms_status.value
-                row.provenance = config.provenance.value
-                row.rate_limit = config.rate_limit
-                row.requires_auth = config.requires_auth
-                row.last_audited = config.last_audited
-        await session.commit()
+        # Sync current registry eligibility without changing jobs or run history.
+        await sync_registry_sources(session)
 
     # Start Telegram bot
     telegram_task = None
@@ -124,12 +123,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    settings = get_settings()
+    app.add_middleware(CSRFMiddleware)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_origin_list,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
     )
 
     app.include_router(auth.router, prefix="/auth", tags=["auth"])

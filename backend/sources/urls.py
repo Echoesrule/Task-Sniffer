@@ -597,31 +597,6 @@ def identify_job_url(links: Iterable[CandidateLink], *, title_hint: str = "",
 # ---------------------------------------------------------------------------
 
 
-async def resolve_redirects(client: httpx.AsyncClient, url: str) -> RedirectChain:
-    """Follow redirects and record the chain (spec §11).
-
-    Relies on ``client.follow_redirects=True``; httpx exposes the final URL and
-    history.
-    """
-    chain: list[str] = []
-    try:
-        response = await client.get(url)
-        chain = [h.headers.get("location", "") for h in response.history if h.headers.get("location")]
-        chain = [url] + [c for c in chain if c]
-        final = str(response.url) if response.url else url
-        return RedirectChain(
-            original_url=url,
-            final_url=final,
-            chain=chain,
-            status=response.status_code,
-        )
-    except httpx.HTTPStatusError as exc:
-        return RedirectChain(original_url=url, final_url=url, status=exc.response.status_code)
-    except (httpx.RequestError, httpx.TimeoutException) as exc:
-        logger.debug("Redirect resolve failed for %s: %s", url, exc)
-        return RedirectChain(original_url=url, final_url=url)
-
-
 async def fetch_with_policy(
     client: httpx.AsyncClient,
     url: str,
