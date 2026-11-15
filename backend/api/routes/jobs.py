@@ -59,40 +59,65 @@ async def _candidate_id(db: AsyncSession, user_id: str) -> str | None:
     ).scalar_one_or_none()
 
 
+def _visible_jobs(include_quarantined: bool):
+    """WHERE clause hiding data-quality quarantined rows from normal views."""
+    return None if include_quarantined else Job.status != "quarantined"
+
+
 @router.get("/stats", response_model=JobStatsResponse)
 async def get_job_stats(
+    include_quarantined: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     user: dict | None = Depends(get_optional_current_user),
 ) -> JobStatsResponse:
     candidate_id = await _candidate_id(db, user["user_id"]) if user else None
-    total = (await db.execute(select(sa_func.count(Job.id)))).scalar() or 0
+    visible = _visible_jobs(include_quarantined)
+
+    total_query = select(sa_func.count(Job.id))
+    by_source_query = select(Source.name, sa_func.count(Job.id)).join(Job, Job.source_id == Source.id)
+    by_country_query = select(Job.country, sa_func.count(Job.id))
+    avg_risk_query = select(sa_func.avg(Job.risk_score))
+    latest_query = select(sa_func.max(Job.created_at))
+    if visible is not None:
+        total_query = total_query.where(visible)
+        by_source_query = by_source_query.where(visible)
+        by_country_query = by_country_query.where(visible)
+        avg_risk_query = avg_risk_query.where(visible)
+        latest_query = latest_query.where(visible)
+
+    total = (await db.execute(total_query)).scalar() or 0
 
     by_source_rows = (
-        await db.execute(
-            select(Source.name, sa_func.count(Job.id))
-            .join(Job, Job.source_id == Source.id)
-            .group_by(Source.name)
-        )
+        await db.execute(by_source_query.group_by(Source.name))
     ).all()
     by_source = {name: count for name, count in by_source_rows}
 
     by_country_rows = (
-        await db.execute(
-            select(Job.country, sa_func.count(Job.id))
-            .group_by(Job.country)
-        )
+        await db.execute(by_country_query.group_by(Job.country))
     ).all()
     by_country = {(c or "Unknown"): count for c, count in by_country_rows}
 
-    avg_risk = (await db.execute(select(sa_func.avg(Job.risk_score)))).scalar() or 0.0
-    avg_match = (await db.execute(select(sa_func.avg(CandidateJobScore.score)).where(CandidateJobScore.candidate_id == candidate_id))).scalar() if candidate_id else 0.0
-    strong_matches = (await db.execute(
-        select(sa_func.count(CandidateJobScore.id)).where(
+    avg_risk = (await db.execute(avg_risk_query)).scalar() or 0.0
+    avg_match_query = (
+        select(sa_func.avg(CandidateJobScore.score))
+        .join(Job, Job.id == CandidateJobScore.job_id)
+        .where(CandidateJobScore.candidate_id == candidate_id)
+    )
+    strong_matches_query = (
+        select(sa_func.count(CandidateJobScore.id))
+        .join(Job, Job.id == CandidateJobScore.job_id)
+        .where(
             CandidateJobScore.candidate_id == candidate_id,
             CandidateJobScore.score >= 0.75,
         )
-    )).scalar() if candidate_id else 0
-    latest_created = (await db.execute(select(sa_func.max(Job.created_at)))).scalar()
+    )
+    if visible is not None:
+        avg_match_query = avg_match_query.where(visible)
+        strong_matches_query = strong_matches_query.where(visible)
+
+    avg_match = (await db.execute(avg_match_query)).scalar() if candidate_id else 0.0
+    strong_matches = (await db.execute(strong_matches_query)).scalar() if candidate_id else 0
+    latest_created = (await db.execute(latest_query)).scalar()
 
     return JobStatsResponse(
         total_jobs=total,
@@ -114,6 +139,7 @@ async def list_jobs(
     salary_min: float | None = Query(None),
     match_score_min: float | None = Query(None),
     risk_level: str | None = Query(None),
+    include_quarantined: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -130,6 +156,10 @@ async def list_jobs(
     score_join = and_(CandidateJobScore.job_id == Job.id, CandidateJobScore.candidate_id == candidate_id)
     query = select(Job, CandidateJobScore).outerjoin(CandidateJobScore, score_join).options(selectinload(Job.source))
     count_query = select(sa_func.count(Job.id)).outerjoin(CandidateJobScore, score_join)
+    visible = _visible_jobs(include_quarantined)
+    if visible is not None:
+        query = query.where(visible)
+        count_query = count_query.where(visible)
 
     if source:
         query = query.join(Source).where(Source.name == source)
@@ -186,6 +216,7 @@ async def get_job(
 @router.post("/search", response_model=JobListResponse)
 async def search_jobs(
     request: JobSearchRequest,
+    include_quarantined: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     user: dict | None = Depends(get_optional_current_user),
 ) -> JobListResponse:
@@ -197,6 +228,11 @@ async def search_jobs(
 
     query = query.where(Job.title.ilike(pattern) | Job.description.ilike(pattern) | Job.company.ilike(pattern))
     count_query = count_query.where(Job.title.ilike(pattern) | Job.description.ilike(pattern) | Job.company.ilike(pattern))
+
+    visible = _visible_jobs(include_quarantined)
+    if visible is not None:
+        query = query.where(visible)
+        count_query = count_query.where(visible)
 
     total = (await db.execute(count_query)).scalar() or 0
     offset = (request.page - 1) * request.page_size

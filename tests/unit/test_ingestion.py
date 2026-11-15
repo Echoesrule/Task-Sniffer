@@ -470,3 +470,164 @@ def test_run_source_scores_jobs_when_candidate_exists(tmp_path):
     assert all(score.score > 0.0 for score in scores)
     assert all(score.breakdown for score in scores)
     assert all(j.match_score == 0.0 and not j.match_breakdown_dict for j in jobs)
+
+
+def test_persists_and_refreshes_dates_remote_type_and_salary(tmp_path):
+    """Source-provided facts survive the pipeline and refresh on re-scrape."""
+    from datetime import datetime
+
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t10.db'}")
+    _run(db.init_db())
+    state = {"salary_min": 90000, "salary_max": 120000}
+
+    def factory(config: SourceConfig) -> JobSourceAdapter:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "/jobs/backend-engineer-1" in str(request.url):
+                return httpx.Response(
+                    200, text=_page("Backend Engineer", "Acme Kenya Ltd")
+                )
+            return httpx.Response(404)
+
+        adapter = type(
+            "FakeAdapter",
+            (JobSourceAdapter,),
+            {
+                "name": config.name,
+                "job_url_patterns": [r"/jobs/[a-z0-9-]+"],
+                "allowed_domains": ["fake.example.com"],
+            },
+        )(_approved(config.name))
+        adapter._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=True
+        )
+
+        async def fetch_listings(*, limit=None, limiter=None):
+            return [
+                ListingItem(
+                    title="Backend Engineer",
+                    company="Acme Kenya Ltd",
+                    location="",
+                    remote=True,
+                    remote_type="remote",
+                    posted_at="2026-11-15T13:38:37+00:00",
+                    closing_at="2026-12-15T23:59:59+00:00",
+                    salary_min=state["salary_min"],
+                    salary_max=state["salary_max"],
+                    currency="EUR",
+                    salary_period="year",
+                    employment_type="Full-Time",
+                    url_candidates=["https://fake.example.com/jobs/backend-engineer-1"],
+                    source_url="https://fake.example.com/jobs/backend-engineer-1",
+                )
+            ]
+
+        async def parse_detail(html, url):
+            return {}
+
+        adapter.fetch_listings = fetch_listings  # type: ignore[method-assign]
+        adapter.parse_detail = parse_detail  # type: ignore[method-assign]
+        return adapter
+
+    async def scenario():
+        engine = IngestionEngine(
+            db.async_session_factory,
+            registry=SourceRegistry(),
+            adapter_factory=factory,
+            max_jobs_per_source=5,
+        )
+        engine._registry.register(_approved("fakesrc"))
+        first = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            job = (await session.execute(select(Job))).scalars().one()
+            job.status = "quarantined"
+            await session.commit()
+
+        state["salary_min"] = 100000
+        state["salary_max"] = 130000
+        second = await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            refreshed = (await session.execute(select(Job))).scalars().one()
+        return first, second, job, refreshed
+
+    first, second, job, refreshed = _run(scenario())
+    _run(db.close())
+
+    assert first.new_jobs == 1
+    assert second.updated_jobs == 1
+    assert job.location == ""
+    assert job.remote is True
+    assert job.remote_type == "remote"
+    assert job.employment_type == "full-time"
+    assert job.salary_period == "year"
+    assert job.salary_currency == "EUR"
+    assert job.posted_at.replace(tzinfo=None) == datetime(2026, 11, 15, 13, 38, 37)
+    assert job.closing_at.replace(tzinfo=None) == datetime(2026, 12, 15, 23, 59, 59)
+    # re-scrape refreshes salary amounts instead of keeping the stale values
+    assert refreshed.salary_min == 100000
+    assert refreshed.salary_max == 130000
+    # and a validated re-scrape clears the data-quality quarantine
+    assert refreshed.status == "discovered"
+
+
+def test_missing_employment_type_is_stored_as_null(tmp_path):
+    db = Database(f"sqlite+aiosqlite:///{tmp_path/'t11.db'}")
+    _run(db.init_db())
+
+    def factory(config: SourceConfig) -> JobSourceAdapter:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "/jobs/backend-engineer-1" in str(request.url):
+                return httpx.Response(
+                    200, text=_page("Backend Engineer", "Acme Kenya Ltd")
+                )
+            return httpx.Response(404)
+
+        adapter = type(
+            "FakeAdapter",
+            (JobSourceAdapter,),
+            {
+                "name": config.name,
+                "job_url_patterns": [r"/jobs/[a-z0-9-]+"],
+                "allowed_domains": ["fake.example.com"],
+            },
+        )(_approved(config.name))
+        adapter._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), follow_redirects=True
+        )
+
+        async def fetch_listings(*, limit=None, limiter=None):
+            return [
+                ListingItem(
+                    title="Backend Engineer",
+                    company="Acme Kenya Ltd",
+                    url_candidates=["https://fake.example.com/jobs/backend-engineer-1"],
+                    source_url="https://fake.example.com/jobs/backend-engineer-1",
+                )
+            ]
+
+        async def parse_detail(html, url):
+            return {}
+
+        adapter.fetch_listings = fetch_listings  # type: ignore[method-assign]
+        adapter.parse_detail = parse_detail  # type: ignore[method-assign]
+        return adapter
+
+    async def scenario():
+        engine = IngestionEngine(
+            db.async_session_factory,
+            registry=SourceRegistry(),
+            adapter_factory=factory,
+            max_jobs_per_source=5,
+        )
+        engine._registry.register(_approved("fakesrc"))
+        await engine.run_source("fakesrc")
+        async with db.async_session_factory() as session:
+            return (await session.execute(select(Job))).scalars().one()
+
+    job = _run(scenario())
+    _run(db.close())
+
+    assert job.employment_type is None
+    assert job.remote_type is None
+    assert job.posted_at is None
+    assert job.closing_at is None
+

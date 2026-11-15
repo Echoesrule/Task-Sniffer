@@ -79,3 +79,70 @@ def test_normalize_unions_provided_and_extracted():
     job = {"title": "Dev", "skills": ["golang"], "description": "We use Python daily."}
     result = n.normalize(job, "test")
     assert {"go", "python"} <= set(result["skills"])
+
+
+# ---------------------------------------------------------------------------
+# Data-accuracy regressions: no fabricated facts, no lost currency
+# ---------------------------------------------------------------------------
+
+
+def test_missing_location_is_not_defaulted_to_nairobi():
+    """Regression: empty source locations were stored as a fake 'Nairobi'."""
+    n = JobNormalizer()
+    result = n.normalize({"title": "Dev"}, "test")
+    assert result["location"] == ""
+    assert result["salary_currency"] is None
+
+
+def test_legacy_currency_key_is_accepted():
+    """Adapters historically emitted ``currency``; it must not be dropped."""
+    n = JobNormalizer()
+    result = n.normalize(
+        {"title": "Dev", "currency": "EUR", "salary_min": 1000, "salary_max": 2000},
+        "test",
+    )
+    assert result["salary_currency"] == "EUR"
+    assert result["salary_min"] == 1000
+    assert result["salary_max"] == 2000
+
+
+def test_currency_without_amount_is_dropped():
+    """A currency alone is not salary data and must not be persisted."""
+    n = JobNormalizer()
+    result = n.normalize({"title": "Dev", "location": "Nairobi", "currency": "KES"}, "test")
+    assert result["salary_currency"] is None
+    assert result["salary_min"] is None
+    assert result["salary_max"] is None
+
+
+def test_kenyan_location_still_infers_currency_when_salary_present():
+    n = JobNormalizer()
+    result = n.normalize(
+        {"title": "Dev", "location": "Nairobi", "salary_min": 150000}, "test"
+    )
+    assert result["salary_currency"] == "KES"
+
+
+def test_salary_period_is_normalized():
+    n = JobNormalizer()
+    assert n.normalize({"title": "Dev", "salary_period": "ANNUAL"}, "test")["salary_period"] == "year"
+    assert n.normalize({"title": "Dev", "salary_period": "per month"}, "test")["salary_period"] == "month"
+
+
+def test_remote_type_only_derived_from_explicit_remote_flag():
+    n = JobNormalizer()
+    assert n.normalize({"title": "Dev"}, "test")["remote_type"] is None
+    assert n.normalize({"title": "Dev", "remote": True}, "test")["remote_type"] == "remote"
+    assert n.normalize(
+        {"title": "Dev", "remote": True, "remote_type": "Hybrid"}, "test"
+    )["remote_type"] == "hybrid"
+    assert n.normalize(
+        {"title": "Dev", "remote_type": "TELECOMMUTE"}, "test"
+    )["remote_type"] == "remote"
+
+
+def test_employment_type_accepts_a_list():
+    n = JobNormalizer()
+    result = n.normalize({"title": "Dev", "employment_type": ["FULL_TIME"]}, "test")
+    assert result["employment_type"] == "full-time"
+

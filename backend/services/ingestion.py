@@ -22,7 +22,8 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
@@ -53,6 +54,58 @@ from backend.sources.urls import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """Parse a source date into a timezone-aware datetime.
+
+    Accepts ISO-8601 (including ``Z``), RFC-2822 (RSS ``pubDate``), common
+    date-only formats, and the year-less day/month form used by listing cards.
+    Returns ``None`` instead of raising so one bad date never fails ingestion.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d %b %Y",
+        "%d %B %Y",
+        "%d %b",
+        "%d %B",
+    ):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if fmt in ("%d %b", "%d %B"):
+            now = datetime.now(timezone.utc)
+            parsed = parsed.replace(year=now.year)
+            if parsed > now + timedelta(days=1):
+                parsed = parsed.replace(year=now.year - 1)
+        return parsed.replace(tzinfo=timezone.utc)
+
+    try:
+        parsed = parsedate_to_datetime(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 # Per-process, per-event-loop source locks shared by every engine instance.
 # The API constructs a fresh engine per request, so an instance-level lock would
@@ -585,6 +638,13 @@ class IngestionEngine:
         original_url = normalized.get("_original_url") or source_url
         canonical_url = normalized.get("_canonical_url") or source_url
         application_url = normalized.get("application_url") or ""
+        posted_at = _parse_datetime(normalized.get("posted_at"))
+        closing_at = _parse_datetime(normalized.get("closing_at"))
+        remote_type = normalized.get("remote_type") or None
+        salary_period = normalized.get("salary_period") or None
+        employment_type = normalized.get("employment_type")
+        if employment_type in ("", "unknown"):
+            employment_type = None
 
         # 1) exact re-scrape of same source+id -> update URL fields
         if source_job_id:
@@ -613,6 +673,28 @@ class IngestionEngine:
                     existing.skills_required_list = normalized.get("skills_required", [])
                     existing.skills_preferred_list = normalized.get("skills_preferred", [])
                     existing.skills_detail_list = normalized.get("skills_detail", [])
+                # Refresh source-provided facts when the new scrape has them.
+                # Never replace an existing value with a missing one.
+                if posted_at:
+                    existing.posted_at = posted_at
+                if closing_at:
+                    existing.closing_at = closing_at
+                if remote_type:
+                    existing.remote_type = remote_type
+                if salary_period:
+                    existing.salary_period = salary_period
+                if employment_type:
+                    existing.employment_type = employment_type
+                if normalized.get("salary_min") is not None:
+                    existing.salary_min = normalized["salary_min"]
+                if normalized.get("salary_max") is not None:
+                    existing.salary_max = normalized["salary_max"]
+                if normalized.get("salary_currency"):
+                    existing.salary_currency = normalized["salary_currency"]
+                # A validated re-scrape means the source is crawlable again;
+                # clear a previous data-quality quarantine.
+                if existing.status == "quarantined":
+                    existing.status = "discovered"
                 existing.url_status = UrlStatus.VALID.value
                 existing.url_validated_at = utcnow()
                 existing.scraped_at = datetime.now(timezone.utc)
@@ -667,17 +749,21 @@ class IngestionEngine:
             location=normalized.get("location", item.location),
             country=source_row.country_focus,
             remote=bool(normalized.get("remote", item.remote)),
-            employment_type=normalized.get("employment_type"),
+            remote_type=remote_type,
+            employment_type=employment_type,
             experience_level=normalized.get("experience_level"),
             salary_min=normalized.get("salary_min"),
             salary_max=normalized.get("salary_max"),
             salary_currency=normalized.get("salary_currency"),
+            salary_period=salary_period,
             source_url=source_url,
             canonical_url=canonical_url,
             original_url=original_url,
             final_url=normalized.get("_final_url") or source_url,
             redirect_chain_list=normalized.get("_redirect_chain") or [],
             application_url=application_url or None,
+            posted_at=posted_at,
+            closing_at=closing_at,
             url_status=normalized.get("url_status", UrlStatus.VALID.value),
             url_validated_at=utcnow(),
             provenances_list=[],

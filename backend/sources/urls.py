@@ -969,25 +969,86 @@ def extract_canonical_url(html: str, base_url: str, *, allowed_domains: set[str]
     return ""
 
 
-def find_explicit_apply_url(html: str, base_url: str, *, allowed_domains: set[str]) -> str:
+#: anchors inside these elements are site chrome, never a job application target
+_CHROME_TAGS: frozenset[str] = frozenset({"nav", "header", "footer"})
+
+#: site-wide destinations that are never an application for a specific posting
+_NON_APPLY_PATH = re.compile(
+    r"/(?:submit-guest-post|guest-post|submit-a-guest-post|advertise|advertising|"
+    r"post-a-job|post-job|employers?|pricing|plans?|contact|about|privacy|terms|"
+    r"login|sign-in|signup|sign-up|register|subscribe|newsletter)(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+
+#: anchor labels that unambiguously ask the reader to apply to this job
+_APPLY_TEXT = re.compile(
+    r"\b(?:apply(?: now| here| today| online)?|"
+    r"apply for (?:this|the) (?:job|role|position)|"
+    r"submit (?:your )?application|send (?:your )?application|quick apply)\b",
+    re.IGNORECASE,
+)
+
+
+def _inside_chrome(anchor: Any) -> bool:
+    """True when the anchor lives in a nav/header/footer block."""
+    for parent in getattr(anchor, "parents", ()):
+        if getattr(parent, "name", None) in _CHROME_TAGS:
+            return True
+    return False
+
+
+def is_site_wide_url(url: str) -> bool:
+    """True when a URL is a site-wide destination, never a job application."""
+    try:
+        path = urlparse(url or "").path or ""
+    except ValueError:
+        return False
+    return bool(_NON_APPLY_PATH.search(path))
+
+
+def find_explicit_apply_url(
+    html: str,
+    base_url: str,
+    *,
+    allowed_domains: set[str],
+    detail_url: str = "",
+) -> str:
     """Locate an explicit 'apply' target on a job page.
 
     Returns the first apply link that passes the shared safety/domain policy or
     ``""`` when none is trustworthy. Never invents a URL.
+
+    Site chrome is ignored: on real pages the first anchor matching "apply" or
+    "submit" is often a navigation link ("Submit a Guest Post"), which
+    previously became the stored application URL for every listing. A link
+    that points back at the detail page is also not an application target.
     """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "html.parser")
+    detail = canonicalize_url(detail_url) if detail_url else ""
+
     for anchor in soup.find_all("a", href=True):
-        text = anchor.get_text(" ", strip=True).lower()
         href = str(anchor.get("href", "")).strip()
-        if not href or href.startswith(("#", "javascript:", "mailto:")):
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
             continue
-        if "apply" in text or "submit" in text or re.search(r"apply", href, re.I):
-            full = urljoin(base_url, href)
-            url = _validated_web_url(full, base_url, allowed_domains)
-            if url:
-                return url
+        if _inside_chrome(anchor):
+            continue
+
+        full = urljoin(base_url, href)
+        if is_site_wide_url(full):
+            continue
+
+        text = anchor.get_text(" ", strip=True)
+        if not (_APPLY_TEXT.search(text) or re.search(r"apply", href, re.I)):
+            continue
+
+        url = _validated_web_url(full, base_url, allowed_domains)
+        if not url:
+            continue
+        if detail and url == detail:
+            continue
+        return url
     return ""
 
 
@@ -1027,7 +1088,9 @@ def extract_url_signals(html: str, base_url: str, *, allowed_domains: set[str],
             notes.append("adapter apply_hint rejected by safety/domain policy")
 
     if not application_url:
-        candidate = find_explicit_apply_url(html, base_url, allowed_domains=allowed_domains)
+        candidate = find_explicit_apply_url(
+            html, base_url, allowed_domains=allowed_domains, detail_url=detail,
+        )
         if candidate:
             application_url = candidate
 

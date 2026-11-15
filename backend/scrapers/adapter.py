@@ -51,12 +51,15 @@ class ListingItem:
     company: str = ""
     location: str = ""
     remote: bool = False
+    remote_type: str = ""
     posted_at: str | None = None
     closing_at: str | None = None
     salary_text: str = ""
     currency: str | None = None
     salary_min: int | None = None
     salary_max: int | None = None
+    salary_period: str = ""
+    employment_type: str = ""
     description: str = ""
     skills: list[str] = field(default_factory=list)
     partner_free: bool = False
@@ -70,12 +73,18 @@ class ListingItem:
             "company": self.company,
             "location": self.location,
             "remote": self.remote,
+            "remote_type": self.remote_type,
             "posted_at": self.posted_at,
             "closing_at": self.closing_at,
             "salary_text": self.salary_text,
+            # ``salary_currency`` is the canonical normalizer key. ``currency``
+            # is kept for backwards compatibility with older adapters.
+            "salary_currency": self.currency,
             "currency": self.currency,
             "salary_min": self.salary_min,
             "salary_max": self.salary_max,
+            "salary_period": self.salary_period,
+            "employment_type": self.employment_type,
             "description": self.description,
             "skills": self.skills,
             "source_job_id": self.source_job_id,

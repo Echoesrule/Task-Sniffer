@@ -99,13 +99,17 @@ class _LegacyAdapter(JobSourceAdapter):
                     company=job.get("company", ""),
                     location=job.get("location", ""),
                     remote=bool(job.get("remote", False)),
+                    remote_type=job.get("remote_type", "") or "",
                     description=job.get("description", ""),
                     skills=job.get("skills", []) or [],
                     posted_at=job.get("posted_at", ""),
+                    closing_at=job.get("closing_at", ""),
                     salary_text=job.get("salary_text", ""),
                     currency=job.get("salary_currency"),
                     salary_min=job.get("salary_min"),
                     salary_max=job.get("salary_max"),
+                    salary_period=job.get("salary_period", "") or "",
+                    employment_type=job.get("employment_type", "") or "",
                     source_job_id=job.get("source_job_id"),
                     url_candidates=([job["url"]] if job.get("url") else []),
                     raw_url=job.get("url", ""),
@@ -115,11 +119,29 @@ class _LegacyAdapter(JobSourceAdapter):
         return items[:limit] if limit else items
 
     async def parse_detail(self, html: str, url: str) -> dict:
+        """Enrich a listing from its already-fetched detail page.
+
+        Prefer the page's schema.org ``JobPosting`` block: it is deterministic,
+        comes from the HTML we already have, and carries fields the listing/API
+        payload often omits (description, salary, closing date, employment
+        type). Only fall back to the legacy detail fetcher when JSON-LD did not
+        provide a description, because several legacy scrapers call the URL as
+        a JSON endpoint and fail against HTML.
+        """
+        from backend.scrapers.jsonld import extract_jobposting
+
+        details = dict(extract_jobposting(html))
+        if details.get("description"):
+            return details
+
         # legacy detail enrichment is best-effort and optional
         try:
-            details = await self._legacy.fetch_job_details(url)
+            legacy = await self._legacy.fetch_job_details(url)
         except Exception:  # noqa: BLE001
-            return {}
-        if not details or not isinstance(details, dict):
-            return {}
-        return {k: v for k, v in details.items() if k not in ("url",)}
+            return details
+        if isinstance(legacy, dict):
+            for key, value in legacy.items():
+                if key == "url" or value in (None, "", [], {}):
+                    continue
+                details.setdefault(key, value)
+        return details

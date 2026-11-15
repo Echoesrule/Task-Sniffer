@@ -213,6 +213,65 @@ def test_missing_application_link_does_not_fabricate():
     assert signals.canonical_url == ""
 
 
+def test_navigation_guest_post_link_is_not_an_application_url():
+    """Regression: jobicy's nav 'Submit a Guest Post' became every apply URL."""
+    page = _page(
+        extra_markup=(
+            '<nav><a href="https://fake.example.com/submit-guest-post">'
+            "Submit a Guest Post</a></nav>"
+            '<div class="apply"><a href="/jobs/backend-engineer-1/apply">Apply now</a></div>'
+        )
+    )
+    signals = extract_url_signals(
+        page, "https://fake.example.com/jobs/backend-engineer-1",
+        allowed_domains=set(DEFAULT_DOMAINS),
+    )
+    assert signals.application_url == "https://fake.example.com/jobs/backend-engineer-1/apply"
+
+
+def test_site_wide_submit_link_is_rejected_even_outside_nav():
+    page = _page(
+        extra_markup=(
+            '<div><a href="https://fake.example.com/submit-guest-post">'
+            "Submit a Guest Post</a></div>"
+        )
+    )
+    signals = extract_url_signals(
+        page, "https://fake.example.com/jobs/backend-engineer-1",
+        allowed_domains=set(DEFAULT_DOMAINS),
+    )
+    assert signals.application_url == ""
+
+
+def test_apply_link_pointing_back_to_detail_is_not_an_application_url():
+    page = _page(
+        apply_href="https://fake.example.com/jobs/backend-engineer-1",
+        apply_text="Apply now >",
+    )
+    signals = extract_url_signals(
+        page, "https://fake.example.com/jobs/backend-engineer-1",
+        allowed_domains=set(DEFAULT_DOMAINS),
+    )
+    assert signals.application_url == ""
+
+
+def test_jsonld_application_url_is_used_when_no_anchor_exists():
+    detail = "https://fake.example.com/jobs/backend-engineer-1"
+    page = _page(
+        jsonld={
+            "@type": "JobPosting",
+            "url": detail,
+            "applicationUrl": "https://fake.example.com/apply/ABC123",
+        }
+    )
+    signals = extract_url_signals(
+        page, detail, allowed_domains=set(DEFAULT_DOMAINS),
+    )
+    assert signals.application_url == "https://fake.example.com/apply/ABC123"
+    assert signals.canonical_url == ""
+
+
+
 def test_no_application_url_is_stored_as_null(tmp_path):
     _results, jobs = _run_engine(tmp_path / "noapp.db", page=VALID)
     job = jobs["backend-engineer-1"]

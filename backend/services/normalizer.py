@@ -95,6 +95,8 @@ class JobNormalizer:
 
         employment_type = self._normalize_employment_type(job.get("employment_type", ""))
         experience_level = self._normalize_experience_level(title, job.get("experience_level", ""))
+        remote = bool(job.get("remote", False))
+        remote_type = self._normalize_remote_type(job.get("remote_type", ""), remote)
 
         url = job.get("url", "")
         if url:
@@ -110,14 +112,17 @@ class JobNormalizer:
             "salary_currency": salary.get("currency"),
             "salary_min": salary.get("min"),
             "salary_max": salary.get("max"),
+            "salary_period": self._normalize_salary_period(job.get("salary_period", "")),
             "skills": skills,
             "skills_required": analysis.required,
             "skills_preferred": analysis.preferred,
             "skills_detail": analysis.detail,
             "employment_type": employment_type,
             "experience_level": experience_level,
-            "remote": job.get("remote", False),
+            "remote": remote,
+            "remote_type": remote_type,
             "posted_at": job.get("posted_at", ""),
+            "closing_at": job.get("closing_at", ""),
             "source": source,
             "fingerprint": self.generate_fingerprint(company, title, location),
         }
@@ -190,7 +195,9 @@ class JobNormalizer:
 
     def _normalize_location(self, location: str) -> str:
         if not location:
-            return "Nairobi"
+            # Never invent a location. A fabricated default (historically
+            # "Nairobi") makes empty rows look complete and poisons matching.
+            return ""
 
         location_lower = location.lower().strip()
 
@@ -214,7 +221,9 @@ class JobNormalizer:
         return location.title()
 
     def _normalize_salary(self, job: dict[str, Any]) -> dict[str, Any]:
-        currency = job.get("salary_currency")
+        # ``salary_currency`` is canonical; ``currency`` is accepted for
+        # backwards compatibility with older adapter payloads.
+        currency = job.get("salary_currency") or job.get("currency")
         salary_min = job.get("salary_min")
         salary_max = job.get("salary_max")
 
@@ -228,13 +237,19 @@ class JobNormalizer:
             if salary_max is None:
                 salary_max = parsed_max
 
-        if currency is None:
-            currency = self._detect_currency(job.get("location", ""))
-
         if salary_min is not None:
             salary_min = int(salary_min)
         if salary_max is not None:
             salary_max = int(salary_max)
+
+        # A currency without an amount is not useful data. In particular, do
+        # not infer KES from a Kenyan location when no salary was extracted:
+        # that previously produced 25 fuzu rows with a currency but no salary.
+        if salary_min is None and salary_max is None:
+            return {"currency": None, "min": None, "max": None}
+
+        if currency is None:
+            currency = self._detect_currency(job.get("location", ""))
 
         return {"currency": currency, "min": salary_min, "max": salary_max}
 
@@ -271,12 +286,47 @@ class JobNormalizer:
             return "KES"
         return None
 
+    @staticmethod
+    def _normalize_salary_period(raw: Any) -> str:
+        text = str(raw or "").lower().strip()
+        if not text:
+            return ""
+        mapping = (
+            ("year", "year"),
+            ("annual", "year"),
+            ("month", "month"),
+            ("week", "week"),
+            ("day", "day"),
+            ("hour", "hour"),
+        )
+        for needle, value in mapping:
+            if needle in text:
+                return value
+        return text[:10]
+
+    @staticmethod
+    def _normalize_remote_type(raw: Any, remote: bool) -> str | None:
+        text = str(raw or "").lower().strip()
+        if text:
+            if "remote" in text or "telecommute" in text:
+                return "remote"
+            if "hybrid" in text:
+                return "hybrid"
+            if "onsite" in text or "on-site" in text or "office" in text:
+                return "onsite"
+            return text[:10]
+        # Only derive a type when the source explicitly marked the job remote.
+        # An absent flag must not be treated as evidence of on-site work.
+        return "remote" if remote else None
+
     def _normalize_skills(self, skills: list[str] | str) -> list[str]:
         """Canonicalize an explicitly supplied skill list via the vocabulary."""
         return normalize_skill_list(skills)
 
     @staticmethod
     def _normalize_employment_type(raw: str) -> str:
+        if isinstance(raw, (list, tuple, set)):
+            raw = " ".join(str(item) for item in raw if item)
         if not raw:
             return "unknown"
         raw_lower = raw.lower().strip()
