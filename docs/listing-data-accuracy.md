@@ -33,8 +33,19 @@ The dataset is **not ready to serve as an LLM baseline**.
 ## Phase 1 Implementation Status (2026-11-15)
 
 The deterministic fixes below are implemented and covered by regression tests.
-They affect **new and re-scraped rows**. The 372-row baseline itself is unchanged
-until `scripts/repair_listing_data.py --apply` is run.
+They affect **new and re-scraped rows**. The 372-row baseline was repaired on
+2026-11-16 after taking a backup (`data/backups/`):
+
+- 132 application URLs cleared (126 site-wide `submit-guest-post`, 6 equal to
+  the detail page);
+- 25 `salary_currency` values without an amount cleared;
+- 246 rows from disabled sources quarantined (`myjobmag` 169, `greenhouse` 50,
+  `fuzu` 27).
+
+Post-repair the normal job views expose **126 rows, all `jobicy`**. The
+remaining 67 application URLs belong to quarantined rows and were left intact
+because they look like genuine per-posting links. Dates still need a re-scrape:
+repair cannot invent them.
 
 | Defect | Fix |
 |---|---|
@@ -310,7 +321,10 @@ the golden set.
    inference without an amount.~~ Done.
 3. ~~Persist `posted_at` / `closing_at` / `remote_type` / `salary_period`.~~ Done.
 4. ~~Fix jobicy JSON-LD enrichment and application URL selection.~~ Done.
-5. Quarantine non-crawlable source rows; purge or re-scrape the greenhouse seed.
-   Tooling is ready (`scripts/repair_listing_data.py`); apply it to the baseline
-   database and decide whether to purge or re-scrape greenhouse.
-6. Re-run the report and compare before touching any LLM integration.
+5. ~~Quarantine non-crawlable source rows; purge or re-scrape the greenhouse
+   seed.~~ Repair applied on 2026-11-16; greenhouse rows are quarantined, not
+   purged. Decide later whether to re-scrape them via the boards API.
+6. ~~Re-run the report and compare before touching any LLM integration.~~ Done;
+   post-repair snapshot in `data/quality/`.
+7. Re-scrape `jobicy` so dates, salary, and JSON-LD enrichment populate the
+   currently visible rows, then re-run the report against the Phase 2 gates.
