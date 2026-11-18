@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as html_module
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
@@ -127,7 +128,24 @@ class JobNormalizer:
             "fingerprint": self.generate_fingerprint(company, title, location),
         }
 
+    @staticmethod
+    def _unescape_entities(value: str) -> str:
+        """Decode HTML entities, including double-escaped source text.
+
+        Some feeds publish titles such as ``Risk &amp;#038; Controls``: the
+        ampersand was escaped twice, so a single pass only yields ``&#038;``.
+        Decode until stable (bounded) so the stored value is the real text.
+        """
+        text = value or ""
+        for _ in range(3):
+            decoded = html_module.unescape(text)
+            if decoded == text:
+                break
+            text = decoded
+        return text
+
     def _normalize_title(self, title: str) -> str:
+        title = self._unescape_entities(title)
         title = re.sub(r"\s+", " ", title).strip()
         title = re.sub(r"\bSr\.?\b", "Senior", title)
         title = re.sub(r"\bJr\.?\b", "Junior", title)
@@ -138,6 +156,7 @@ class JobNormalizer:
         return title.strip()
 
     def _normalize_company(self, company: str) -> str:
+        company = self._unescape_entities(company)
         company = re.sub(r"\s+", " ", company).strip()
         company = company.strip(".")
         title_case_words = {"Ltd", "Inc", "LLC", "Corp", "Co", "PLC"}
@@ -199,6 +218,7 @@ class JobNormalizer:
             # "Nairobi") makes empty rows look complete and poisons matching.
             return ""
 
+        location = self._unescape_entities(location)
         location_lower = location.lower().strip()
 
         for canonical, aliases in KENYA_LOCATIONS.items():

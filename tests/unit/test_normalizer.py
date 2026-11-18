@@ -146,3 +146,33 @@ def test_employment_type_accepts_a_list():
     result = n.normalize({"title": "Dev", "employment_type": ["FULL_TIME"]}, "test")
     assert result["employment_type"] == "full-time"
 
+
+def test_double_escaped_html_entities_are_decoded_in_title():
+    """Regression: jobicy titles arrived as ``Risk &amp;#038; Controls``."""
+    n = JobNormalizer()
+    result = n.normalize(
+        {"title": "Risk &amp;#038; Controls Manager"}, "jobicy"
+    )
+    assert result["title"] == "Risk & Controls Manager"
+
+
+def test_single_and_numeric_entities_are_decoded():
+    n = JobNormalizer()
+    assert n.normalize({"title": "R&amp;D Lead"}, "test")["title"] == "R&D Lead"
+    assert (
+        n.normalize({"title": "Analyst &amp;#8211; Remote"}, "test")["title"]
+        == "Analyst – Remote"
+    )
+
+
+def test_entities_are_decoded_in_company_and_location():
+    n = JobNormalizer()
+    result = n.normalize(
+        {"title": "Dev", "company": "Acme &amp; Co", "location": "Kigali &amp; Kampala"},
+        "test",
+    )
+    # company normalization lowercases short joiner words like "Co"
+    assert result["company"] == "Acme & co"
+    assert result["location"] == "Kigali & Kampala"
+
+
