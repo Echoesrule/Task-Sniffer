@@ -298,6 +298,16 @@ for approved sources:
 | Duplicate rate | < 2% |
 | Salary amount coverage | reported, not forced |
 
+Golden-set tooling:
+
+```bash
+python scripts/generate_golden_set.py --db work_bot_hunter.db --size 150 --out data/golden/golden.csv
+# fill labels in the CSV, then:
+python scripts/score_golden_set.py --labels data/golden/golden.csv --db work_bot_hunter.db
+# optional live link check:
+python scripts/score_golden_set.py --labels data/golden/golden.csv --db work_bot_hunter.db --check-links
+```
+
 Do not start LLM work until these gates are met or explicitly waived.
 
 ### Phase 3 — LLM only for enrichment
@@ -326,5 +336,13 @@ the golden set.
    purged. Decide later whether to re-scrape them via the boards API.
 6. ~~Re-run the report and compare before touching any LLM integration.~~ Done;
    post-repair snapshot in `data/quality/`.
-7. Re-scrape `jobicy` so dates, salary, and JSON-LD enrichment populate the
-   currently visible rows, then re-run the report against the Phase 2 gates.
+7. ~~Re-scrape `jobicy` so dates, salary, and JSON-LD enrichment populate the
+   currently visible rows, then re-run the report.~~ Done on 2026-11-16
+   (200 new rows; 326 discovered jobicy rows total). Latest report:
+   `data/quality/work_bot_hunter_20261118T071120Z.json` (jobicy: desc 100%,
+   posted 61%, salary 38%, app_url 0%, dup 0%).
+8. Label a golden set and score it (`generate_golden_set.py` /
+   `score_golden_set.py`). Current visible pool is jobicy-only; decide whether
+   to re-scrape greenhouse to add a second stratum or waive cross-source gates.
+9. Add DB invariants and wire `RiskEngine` into ingestion/batch so `risk_*` and
+   `analyzed_at` are populated for gate evaluation.
